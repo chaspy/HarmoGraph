@@ -134,6 +134,12 @@ button.danger {
   gap: 8px;
 }
 
+.track-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .controls-row {
   display: flex;
   gap: 10px;

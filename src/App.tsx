@@ -28,11 +28,13 @@ function App() {
   const [playback, setPlayback] = useState<PlaybackState>(defaultPlayback);
   const [isRecording, setIsRecording] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [referenceRecordingRole, setReferenceRecordingRole] = useState<TrackRole | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [manualOffsetMs, setManualOffsetMs] = useState(0);
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig>(DEFAULT_ANALYSIS_CONFIG);
 
   const recorderRef = useRef(new Recorder());
+  const referenceRecorderRef = useRef(new Recorder());
   const recordingRef = useRef(false);
   const vocalAudioRef = useRef<HTMLAudioElement | null>(null);
   const chorusAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -132,6 +134,44 @@ function App() {
     setStatus(`曲「${name}」を作成しました。`);
   };
 
+  const registerTrack = async (
+    role: TrackRole,
+    payload: {
+      blob: Blob;
+      name: string;
+      mimeType: string;
+      durationSec: number;
+    },
+  ): Promise<void> => {
+    if (!selectedProject) return;
+    if (payload.durationSec > MAX_SONG_SEC) {
+      setStatus('10分を超える音源はMVP対象外です。10分以内にしてください。');
+      return;
+    }
+
+    const track: StoredTrack = {
+      id: createId(),
+      role,
+      name: payload.name,
+      mimeType: payload.mimeType,
+      blob: payload.blob,
+      durationSec: payload.durationSec,
+    };
+
+    const nextProject: Project = {
+      ...selectedProject,
+      tracks: [...selectedProject.tracks.filter((item) => item.role !== role), track],
+    };
+
+    await persistProject(nextProject);
+
+    if (payload.durationSec > WARN_SONG_SEC) {
+      setStatus('5分を超える音源です。解析に時間がかかる可能性があります。');
+    } else {
+      setStatus(`${role === 'vocal' ? 'ボーカル' : 'コーラス'}音源を登録しました。`);
+    }
+  };
+
   const onUploadTrack = async (role: TrackRole, file: File | null): Promise<void> => {
     if (!selectedProject || !file) return;
 
@@ -145,31 +185,53 @@ function App() {
     });
     URL.revokeObjectURL(probeUrl);
 
-    if (durationSec > MAX_SONG_SEC) {
-      setStatus('10分を超える音源はMVP対象外です。10分以内にしてください。');
-      return;
-    }
-
-    const track: StoredTrack = {
-      id: createId(),
-      role,
+    await registerTrack(role, {
+      blob: file,
       name: file.name,
       mimeType: file.type || 'audio/mpeg',
-      blob: file,
       durationSec,
-    };
+    });
+  };
 
-    const nextProject: Project = {
-      ...selectedProject,
-      tracks: [...selectedProject.tracks.filter((item) => item.role !== role), track],
-    };
+  const startReferenceRecording = async (role: TrackRole): Promise<void> => {
+    if (!selectedProject) return;
+    if (recordingRef.current || isRecording) {
+      setStatus('練習録音中は参照録音を開始できません。');
+      return;
+    }
+    if (referenceRecordingRole) return;
 
-    await persistProject(nextProject);
+    try {
+      setStatus(
+        `${role === 'vocal' ? '参照ボーカル' : '参照コーラス'}の録音開始。マイク権限を確認します。`,
+      );
+      await referenceRecorderRef.current.start();
+      setReferenceRecordingRole(role);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '参照録音の開始に失敗しました';
+      setStatus(`参照録音開始エラー: ${message}`);
+      setReferenceRecordingRole(null);
+    }
+  };
 
-    if (durationSec > WARN_SONG_SEC) {
-      setStatus('5分を超える音源です。解析に時間がかかる可能性があります。');
-    } else {
-      setStatus(`${role === 'vocal' ? 'ボーカル' : 'コーラス'}音源を登録しました。`);
+  const stopReferenceRecording = async (): Promise<void> => {
+    if (!referenceRecordingRole) return;
+    const role = referenceRecordingRole;
+    try {
+      const recording = await referenceRecorderRef.current.stop();
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const ext = recording.mimeType.includes('mp4') ? 'm4a' : 'webm';
+      await registerTrack(role, {
+        blob: recording.blob,
+        name: `recorded-${role}-${timestamp}.${ext}`,
+        mimeType: recording.mimeType,
+        durationSec: recording.durationSec,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '参照録音の停止に失敗しました';
+      setStatus(`参照録音停止エラー: ${message}`);
+    } finally {
+      setReferenceRecordingRole(null);
     }
   };
 
@@ -201,7 +263,11 @@ function App() {
   const startPractice = async (): Promise<void> => {
     if (!selectedProject) return;
     if (!chorusTrack) {
-      setStatus('練習前に参照コーラス音源をアップロードしてください。');
+      setStatus('練習前に参照コーラス音源をアップロードまたは録音してください。');
+      return;
+    }
+    if (referenceRecordingRole) {
+      setStatus('参照録音中は練習録音を開始できません。');
       return;
     }
     if (isRecording) return;
@@ -398,6 +464,25 @@ function App() {
                     accept="audio/*"
                     onChange={(event) => void onUploadTrack('vocal', event.target.files?.[0] ?? null)}
                   />
+                  <div className="track-actions">
+                    <button
+                      type="button"
+                      disabled={
+                        isRecording ||
+                        (referenceRecordingRole !== null && referenceRecordingRole !== 'vocal')
+                      }
+                      onClick={() => void startReferenceRecording('vocal')}
+                    >
+                      参照録音開始
+                    </button>
+                    <button
+                      type="button"
+                      disabled={referenceRecordingRole !== 'vocal'}
+                      onClick={() => void stopReferenceRecording()}
+                    >
+                      参照録音停止
+                    </button>
+                  </div>
                   <span>{vocalTrack?.name ?? '未登録'}</span>
                 </label>
                 <label>
@@ -407,6 +492,25 @@ function App() {
                     accept="audio/*"
                     onChange={(event) => void onUploadTrack('chorus', event.target.files?.[0] ?? null)}
                   />
+                  <div className="track-actions">
+                    <button
+                      type="button"
+                      disabled={
+                        isRecording ||
+                        (referenceRecordingRole !== null && referenceRecordingRole !== 'chorus')
+                      }
+                      onClick={() => void startReferenceRecording('chorus')}
+                    >
+                      参照録音開始
+                    </button>
+                    <button
+                      type="button"
+                      disabled={referenceRecordingRole !== 'chorus'}
+                      onClick={() => void stopReferenceRecording()}
+                    >
+                      参照録音停止
+                    </button>
+                  </div>
                   <span>{chorusTrack?.name ?? '未登録'}</span>
                 </label>
               </div>
@@ -416,13 +520,22 @@ function App() {
               <h3>練習セッション</h3>
               <p>2秒カウント後に参照再生しながら録音します。</p>
               <div className="controls-row">
-                <button type="button" disabled={isRecording} onClick={() => void startPractice()}>
+                <button
+                  type="button"
+                  disabled={isRecording || referenceRecordingRole !== null}
+                  onClick={() => void startPractice()}
+                >
                   練習開始
                 </button>
                 <button type="button" disabled={!isRecording} onClick={() => void stopPractice()}>
                   停止して解析
                 </button>
                 {countdown !== null && <strong>開始まで {countdown}</strong>}
+                {referenceRecordingRole !== null && (
+                  <strong>
+                    参照{referenceRecordingRole === 'vocal' ? 'ボーカル' : 'コーラス'}を録音中
+                  </strong>
+                )}
               </div>
 
               <div className="playback-grid">
