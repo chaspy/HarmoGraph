@@ -7,6 +7,7 @@ export interface StoredTrack {
   mimeType: string;
   blob: Blob;
   durationSec: number;
+  offsetMs: number;
 }
 
 export interface AnalysisConfig {

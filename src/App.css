@@ -140,6 +140,32 @@ button.danger {
   flex-wrap: wrap;
 }
 
+.offset-control {
+  display: grid;
+  gap: 4px;
+}
+
+.wave-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.wave-canvas {
+  width: 100%;
+  max-width: 1000px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-top: 6px;
+  background: #f8fafc;
+}
+
+.offset-slider {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
 .controls-row {
   display: flex;
   gap: 10px;

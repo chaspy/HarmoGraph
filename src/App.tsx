@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { PitchCanvas } from './components/PitchCanvas';
+import { ReferenceWaveforms } from './components/ReferenceWaveforms';
 import { analyzePitch, DEFAULT_ANALYSIS_CONFIG } from './lib/analyzer';
 import { decodeBlobToAudioBuffer } from './lib/audioUtils';
 import { Recorder } from './lib/recorder';
@@ -29,6 +30,8 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [referenceRecordingRole, setReferenceRecordingRole] = useState<TrackRole | null>(null);
+  const [referenceCursorSec, setReferenceCursorSec] = useState(0);
+  const [isReferencePlaying, setIsReferencePlaying] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [manualOffsetMs, setManualOffsetMs] = useState(0);
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig>(DEFAULT_ANALYSIS_CONFIG);
@@ -39,6 +42,8 @@ function App() {
   const vocalAudioRef = useRef<HTMLAudioElement | null>(null);
   const chorusAudioRef = useRef<HTMLAudioElement | null>(null);
   const userAudioRef = useRef<HTMLAudioElement | null>(null);
+  const referenceTimeoutIdsRef = useRef<number[]>([]);
+  const referenceRafRef = useRef<number | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -49,6 +54,11 @@ function App() {
     if (!selectedProject) return null;
     return selectedProject.tracks.find((track) => track.role === role) ?? null;
   };
+  const getTrackOffsetMs = useCallback(
+    (role: TrackRole): number =>
+      selectedProject?.tracks.find((track) => track.role === role)?.offsetMs ?? 0,
+    [selectedProject],
+  );
 
   const vocalTrack = getTrack('vocal');
   const chorusTrack = getTrack('chorus');
@@ -156,6 +166,7 @@ function App() {
       mimeType: payload.mimeType,
       blob: payload.blob,
       durationSec: payload.durationSec,
+      offsetMs: 0,
     };
 
     const nextProject: Project = {
@@ -236,6 +247,14 @@ function App() {
   };
 
   const stopAllPlayback = (): void => {
+    referenceTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    referenceTimeoutIdsRef.current = [];
+    if (referenceRafRef.current !== null) {
+      window.cancelAnimationFrame(referenceRafRef.current);
+      referenceRafRef.current = null;
+    }
+    setIsReferencePlaying(false);
+    setReferenceCursorSec(0);
     [vocalAudioRef.current, chorusAudioRef.current, userAudioRef.current].forEach((audio) => {
       if (!audio) return;
       audio.pause();
@@ -243,22 +262,122 @@ function App() {
     });
   };
 
-  const playReference = async (): Promise<void> => {
+  const updateTrackOffset = async (role: TrackRole, offsetMs: number): Promise<void> => {
+    if (!selectedProject) return;
+    const target = getTrack(role);
+    if (!target) return;
+    const nextProject: Project = {
+      ...selectedProject,
+      tracks: selectedProject.tracks.map((track) =>
+        track.id === target.id ? { ...track, offsetMs } : track,
+      ),
+    };
+    await persistProject(nextProject);
+  };
+
+  const changeReferenceOffset = async (role: TrackRole, offsetMs: number): Promise<void> => {
+    const timelineSec = isReferencePlaying ? computeReferenceTimelineSec() : referenceCursorSec;
+    await updateTrackOffset(role, offsetMs);
+    if (isReferencePlaying) {
+      await playReference(timelineSec);
+    }
+  };
+
+  const computeReferenceTimelineSec = useCallback((): number => {
+    const points: number[] = [];
+    const vocal = vocalAudioRef.current;
+    const chorus = chorusAudioRef.current;
+    if (vocal && !vocal.paused && !Number.isNaN(vocal.currentTime)) {
+      points.push(vocal.currentTime + getTrackOffsetMs('vocal') / 1000);
+    }
+    if (chorus && !chorus.paused && !Number.isNaN(chorus.currentTime)) {
+      points.push(chorus.currentTime + getTrackOffsetMs('chorus') / 1000);
+    }
+    if (points.length === 0) return referenceCursorSec;
+    return Math.max(...points, 0);
+  }, [getTrackOffsetMs, referenceCursorSec]);
+
+  const pauseReference = (): void => {
+    referenceTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    referenceTimeoutIdsRef.current = [];
+    const timelineSec = computeReferenceTimelineSec();
+    setReferenceCursorSec(Math.max(0, timelineSec));
+    setIsReferencePlaying(false);
+    [vocalAudioRef.current, chorusAudioRef.current].forEach((audio) => {
+      if (!audio) return;
+      audio.pause();
+    });
+  };
+
+  const playReference = async (fromSec?: number): Promise<void> => {
     if (!vocalUrl && !chorusUrl) {
       setStatus('参照トラックがありません。');
       return;
     }
-    const promises: Promise<void>[] = [];
-    if (vocalAudioRef.current && vocalUrl) {
-      vocalAudioRef.current.currentTime = 0;
-      promises.push(vocalAudioRef.current.play());
-    }
-    if (chorusAudioRef.current && chorusUrl) {
-      chorusAudioRef.current.currentTime = 0;
-      promises.push(chorusAudioRef.current.play());
-    }
-    await Promise.allSettled(promises);
+    const startSec = Math.max(0, fromSec ?? referenceCursorSec);
+    const vocalOffsetSec = getTrackOffsetMs('vocal') / 1000;
+    const chorusOffsetSec = getTrackOffsetMs('chorus') / 1000;
+    const baseSec = Math.min(vocalOffsetSec, chorusOffsetSec, startSec);
+
+    referenceTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    referenceTimeoutIdsRef.current = [];
+    [vocalAudioRef.current, chorusAudioRef.current].forEach((audio) => audio?.pause());
+
+    const playTrack = (
+      audio: HTMLAudioElement | null,
+      hasUrl: boolean,
+      offsetSec: number,
+    ): void => {
+      if (!audio || !hasUrl) return;
+      const delayMs = Math.max(0, (offsetSec - startSec) * 1000);
+      const seekSec = Math.max(0, startSec - offsetSec);
+      audio.currentTime = seekSec;
+      const timeoutId = window.setTimeout(() => {
+        void audio.play();
+      }, delayMs);
+      referenceTimeoutIdsRef.current.push(timeoutId);
+    };
+
+    playTrack(vocalAudioRef.current, Boolean(vocalUrl), vocalOffsetSec);
+    playTrack(chorusAudioRef.current, Boolean(chorusUrl), chorusOffsetSec);
+    setReferenceCursorSec(Math.max(0, baseSec));
+    setIsReferencePlaying(true);
   };
+
+  useEffect(() => {
+    if (!isReferencePlaying) {
+      if (referenceRafRef.current !== null) {
+        window.cancelAnimationFrame(referenceRafRef.current);
+        referenceRafRef.current = null;
+      }
+      return;
+    }
+
+    const tick = (): void => {
+      const timeline = computeReferenceTimelineSec();
+      setReferenceCursorSec(Math.max(0, timeline));
+
+      const vocal = vocalAudioRef.current;
+      const chorus = chorusAudioRef.current;
+      const vocalActive = Boolean(vocal && !vocal.paused);
+      const chorusActive = Boolean(chorus && !chorus.paused);
+
+      if (!vocalActive && !chorusActive) {
+        setIsReferencePlaying(false);
+        return;
+      }
+
+      referenceRafRef.current = window.requestAnimationFrame(tick);
+    };
+
+    referenceRafRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      if (referenceRafRef.current !== null) {
+        window.cancelAnimationFrame(referenceRafRef.current);
+        referenceRafRef.current = null;
+      }
+    };
+  }, [computeReferenceTimelineSec, isReferencePlaying]);
 
   const startPractice = async (): Promise<void> => {
     if (!selectedProject) return;
@@ -284,7 +403,7 @@ function App() {
         if (sec <= 0) {
           window.clearInterval(timer);
           setCountdown(null);
-          void playReference();
+          void playReference(0);
           setStatus('録音中...（停止を押すまで継続）');
           return;
         }
@@ -516,6 +635,32 @@ function App() {
               </div>
             </section>
 
+            <ReferenceWaveforms
+              vocalBlob={vocalTrack?.blob ?? null}
+              chorusBlob={chorusTrack?.blob ?? null}
+              vocalOffsetMs={getTrackOffsetMs('vocal')}
+              chorusOffsetMs={getTrackOffsetMs('chorus')}
+              cursorSec={referenceCursorSec}
+              onVocalOffsetChange={(offset) => void changeReferenceOffset('vocal', offset)}
+              onChorusOffsetChange={(offset) => void changeReferenceOffset('chorus', offset)}
+            />
+
+            <section className="card">
+              <h3>参照トラック再生コントロール</h3>
+              <div className="controls-row">
+                <button type="button" onClick={() => void playReference()}>
+                  再生
+                </button>
+                <button type="button" onClick={pauseReference}>
+                  一時停止
+                </button>
+                <button type="button" onClick={stopAllPlayback}>
+                  先頭へ戻す
+                </button>
+                <strong>再生位置: {formatSec(referenceCursorSec)}</strong>
+              </div>
+            </section>
+
             <section className="card">
               <h3>練習セッション</h3>
               <p>2秒カウント後に参照再生しながら録音します。</p>
@@ -613,14 +758,6 @@ function App() {
                 </div>
               </div>
 
-              <div className="controls-row">
-                <button type="button" onClick={() => void playReference()}>
-                  参照を再生
-                </button>
-                <button type="button" onClick={stopAllPlayback}>
-                  停止
-                </button>
-              </div>
             </section>
 
             {selectedSession && (
