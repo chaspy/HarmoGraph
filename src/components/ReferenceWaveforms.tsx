@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { decodeBlobToAudioBuffer } from '../lib/audioUtils';
+import { formatSec } from '../lib/utils';
 
 interface TrackWave {
   peaks: Float32Array;
@@ -13,6 +14,11 @@ interface ReferenceWaveformsProps {
   vocalOffsetMs: number;
   chorusOffsetMs: number;
   cursorSec: number;
+  isPlaying: boolean;
+  onPlay: () => void;
+  onPause: () => void;
+  onReset: () => void;
+  onSeek: (timelineSec: number) => void;
   onVocalOffsetChange: (offsetMs: number) => void;
   onChorusOffsetChange: (offsetMs: number) => void;
 }
@@ -107,6 +113,11 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
     vocalOffsetMs,
     chorusOffsetMs,
     cursorSec,
+    isPlaying,
+    onPlay,
+    onPause,
+    onReset,
+    onSeek,
     onVocalOffsetChange,
     onChorusOffsetChange,
   } = props;
@@ -160,6 +171,7 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
     );
     return {
       startSec: start,
+      endSec: end,
       spanSec: Math.max(1, end - start),
     };
   }, [chorusOffsetMs, chorusWave?.durationSec, vocalOffsetMs, vocalWave?.durationSec]);
@@ -201,6 +213,31 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
     <section className="card">
       <h3>参照トラック位置合わせ</h3>
       <p>波形を見ながら、再生中にms単位で位置調整できます。</p>
+
+      <div className="controls-row">
+        <button type="button" onClick={onPlay}>
+          再生
+        </button>
+        <button type="button" onClick={onPause}>
+          一時停止
+        </button>
+        <button type="button" onClick={onReset}>
+          先頭へ戻す
+        </button>
+        <strong>{isPlaying ? '再生中' : '停止中'} / 再生位置: {formatSec(cursorSec)}</strong>
+      </div>
+
+      <label className="offset-slider">
+        シーク
+        <input
+          type="range"
+          min={0}
+          max={Math.max(1, viewport.endSec)}
+          step={0.01}
+          value={cursorSec}
+          onChange={(event) => onSeek(Number(event.target.value))}
+        />
+      </label>
 
       <div className="wave-stack">
         <div>

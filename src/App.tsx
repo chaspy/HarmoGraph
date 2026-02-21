@@ -262,6 +262,27 @@ function App() {
     });
   };
 
+  const resetReferencePlayback = (): void => {
+    referenceTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    referenceTimeoutIdsRef.current = [];
+    if (referenceRafRef.current !== null) {
+      window.cancelAnimationFrame(referenceRafRef.current);
+      referenceRafRef.current = null;
+    }
+    setIsReferencePlaying(false);
+    setReferenceCursorSec(0);
+    const vocal = vocalAudioRef.current;
+    const chorus = chorusAudioRef.current;
+    if (vocal) {
+      vocal.pause();
+      vocal.currentTime = Math.max(0, -getTrackOffsetMs('vocal') / 1000);
+    }
+    if (chorus) {
+      chorus.pause();
+      chorus.currentTime = Math.max(0, -getTrackOffsetMs('chorus') / 1000);
+    }
+  };
+
   const updateTrackOffset = async (role: TrackRole, offsetMs: number): Promise<void> => {
     if (!selectedProject) return;
     const target = getTrack(role);
@@ -280,6 +301,23 @@ function App() {
     await updateTrackOffset(role, offsetMs);
     if (isReferencePlaying) {
       await playReference(timelineSec);
+    }
+  };
+
+  const seekReference = async (timelineSec: number): Promise<void> => {
+    const sec = Math.max(0, timelineSec);
+    setReferenceCursorSec(sec);
+    if (isReferencePlaying) {
+      await playReference(sec);
+      return;
+    }
+    const vocal = vocalAudioRef.current;
+    const chorus = chorusAudioRef.current;
+    if (vocal) {
+      vocal.currentTime = Math.max(0, sec - getTrackOffsetMs('vocal') / 1000);
+    }
+    if (chorus) {
+      chorus.currentTime = Math.max(0, sec - getTrackOffsetMs('chorus') / 1000);
     }
   };
 
@@ -641,25 +679,14 @@ function App() {
               vocalOffsetMs={getTrackOffsetMs('vocal')}
               chorusOffsetMs={getTrackOffsetMs('chorus')}
               cursorSec={referenceCursorSec}
+              isPlaying={isReferencePlaying}
+              onPlay={() => void playReference()}
+              onPause={pauseReference}
+              onReset={resetReferencePlayback}
+              onSeek={(sec) => void seekReference(sec)}
               onVocalOffsetChange={(offset) => void changeReferenceOffset('vocal', offset)}
               onChorusOffsetChange={(offset) => void changeReferenceOffset('chorus', offset)}
             />
-
-            <section className="card">
-              <h3>参照トラック再生コントロール</h3>
-              <div className="controls-row">
-                <button type="button" onClick={() => void playReference()}>
-                  再生
-                </button>
-                <button type="button" onClick={pauseReference}>
-                  一時停止
-                </button>
-                <button type="button" onClick={stopAllPlayback}>
-                  先頭へ戻す
-                </button>
-                <strong>再生位置: {formatSec(referenceCursorSec)}</strong>
-              </div>
-            </section>
 
             <section className="card">
               <h3>練習セッション</h3>
