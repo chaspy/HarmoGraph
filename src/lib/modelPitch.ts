@@ -5,10 +5,10 @@ import { mixToMono } from './audioUtils';
 const MODEL_PATH = '/models/basic-pitch/model.json';
 const FRAME_SEC = 256 / 22050;
 const MIDI_BASE = 21;
-const TOP_K = 8;
-const SILENCE_THRESHOLD = 0.1;
-const JUMP_PENALTY = 0.18;
-const LARGE_JUMP_PENALTY = 0.9;
+const TOP_K = 12;
+const SILENCE_THRESHOLD = 0.06;
+const JUMP_PENALTY = 0.28;
+const LARGE_JUMP_PENALTY = 1.4;
 
 let detectorPromise: Promise<BasicPitch> | null = null;
 
@@ -32,21 +32,67 @@ const buildCandidates = (frames: number[][]): Candidate[][] => {
       .map((prob, index) => ({ midi: MIDI_BASE + index, prob }))
       .sort((a, b) => b.prob - a.prob)
       .slice(0, TOP_K)
-      .filter((item) => item.prob > 0.02);
+      .filter((item) => item.prob > 0.004);
 
     const maxProb = ranked[0]?.prob ?? 0;
-    const withSilence: Candidate[] = [{ midi: null, prob: 1 - Math.min(1, maxProb + 0.1) }, ...ranked];
+    const withSilence: Candidate[] = [{ midi: null, prob: Math.max(0.01, 0.4 - maxProb) }, ...ranked];
     return withSilence;
   });
 };
 
 const transitionCost = (fromMidi: number | null, toMidi: number | null): number => {
   if (fromMidi === null && toMidi === null) return 0;
-  if (fromMidi === null || toMidi === null) return 0.12;
+  if (fromMidi === null || toMidi === null) return 0.22;
   const diff = Math.abs(toMidi - fromMidi);
   if (diff <= 2) return diff * 0.03;
   if (diff <= 12) return diff * JUMP_PENALTY;
-  return LARGE_JUMP_PENALTY + diff * 0.08;
+  return LARGE_JUMP_PENALTY + diff * 0.11;
+};
+
+const stabilizePath = (path: Array<{ midi: number | null; prob: number }>): Array<{
+  midi: number | null;
+  prob: number;
+}> => {
+  const out = [...path];
+
+  // Fill very short gaps to avoid fragmented notes.
+  for (let i = 1; i < out.length - 1; i += 1) {
+    if (out[i].midi !== null) continue;
+    const prev = out[i - 1].midi;
+    const next = out[i + 1].midi;
+    if (prev !== null && next !== null && Math.abs(prev - next) <= 2) {
+      out[i] = { midi: Math.round((prev + next) / 2), prob: Math.min(out[i - 1].prob, out[i + 1].prob) };
+    }
+  }
+
+  // Octave normalization around local history.
+  let anchor: number | null = null;
+  for (let i = 0; i < out.length; i += 1) {
+    const current = out[i];
+    if (current.midi === null) continue;
+    if (anchor === null) {
+      anchor = current.midi;
+      continue;
+    }
+    let best = current.midi;
+    let bestAbs = Math.abs(current.midi - anchor);
+    for (let shift = -2; shift <= 2; shift += 1) {
+      const candidate = current.midi + 12 * shift;
+      const abs = Math.abs(candidate - anchor);
+      if (abs < bestAbs) {
+        bestAbs = abs;
+        best = candidate;
+      }
+    }
+    if (bestAbs <= 9) {
+      out[i] = { ...current, midi: best };
+      anchor = Math.round(anchor * 0.8 + best * 0.2);
+    } else {
+      out[i] = { midi: null, prob: current.prob };
+    }
+  }
+
+  return out;
 };
 
 const viterbiTrack = (frames: number[][]): Array<{ midi: number | null; prob: number }> => {
@@ -104,7 +150,7 @@ const viterbiTrack = (frames: number[][]): Array<{ midi: number | null; prob: nu
     }
   }
 
-  return path;
+  return stabilizePath(path);
 };
 
 export const extractPitchByModel = async (buffer: AudioBuffer): Promise<PitchFrame[]> => {
