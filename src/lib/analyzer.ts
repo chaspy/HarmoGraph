@@ -306,9 +306,9 @@ export const analyzePitch = async (
   const refPitch = quantizePitchToRhythmGrid(refVoiced, rhythm);
   const userGrid = quantizePitchToRhythmGrid(userVoiced, rhythm);
   const userPitch = backfillFromNextVoicedCell(
-    holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 1, 1), refPitch, 4),
+    holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 5, 1), refPitch, 8),
     refPitch,
-    1,
+    0,
   );
 
   const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
