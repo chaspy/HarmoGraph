@@ -1,4 +1,3 @@
-import { PitchDetector } from 'pitchy';
 import type {
   AnalysisConfig,
   AnalysisResult,
@@ -6,159 +5,15 @@ import type {
   ErrorSegment,
   PitchFrame,
 } from '../types';
-import { applyMedianSmoothing, mixToMono } from './audioUtils';
+import { mixToMono } from './audioUtils';
+import { extractPitchByModel } from './modelPitch';
 import { median } from './utils';
 
 export const DEFAULT_ANALYSIS_CONFIG: AnalysisConfig = {
   toleranceCents: 25,
-  clarityThreshold: 0.5,
+  clarityThreshold: 0.2,
   frameSize: 4096,
   hopSize: 1024,
-};
-
-const MIN_HZ = 70;
-const MAX_HZ = 1100;
-const MIN_RMS = 0.008;
-
-const rms = (frame: Float32Array): number => {
-  let sum = 0;
-  for (let i = 0; i < frame.length; i += 1) {
-    const sample = frame[i];
-    sum += sample * sample;
-  }
-  return Math.sqrt(sum / frame.length);
-};
-
-const centsDiff = (aHz: number, bHz: number): number => 1200 * Math.log2(aHz / bHz);
-
-const octaveNormalize = (
-  values: Array<number | null>,
-  minHz: number,
-  maxHz: number,
-): Array<number | null> => {
-  const normalized: Array<number | null> = [];
-  let prev: number | null = null;
-
-  for (const current of values) {
-    if (current === null) {
-      normalized.push(null);
-      continue;
-    }
-    if (prev === null) {
-      normalized.push(current);
-      prev = current;
-      continue;
-    }
-
-    let best = current;
-    let bestAbs = Math.abs(centsDiff(current, prev));
-    for (let shift = -2; shift <= 2; shift += 1) {
-      const candidate = current * 2 ** shift;
-      if (candidate < minHz || candidate > maxHz) continue;
-      const abs = Math.abs(centsDiff(candidate, prev));
-      if (abs < bestAbs) {
-        bestAbs = abs;
-        best = candidate;
-      }
-    }
-
-    if (bestAbs > 700) {
-      normalized.push(null);
-      continue;
-    }
-    normalized.push(best);
-    prev = best;
-  }
-
-  return normalized;
-};
-
-const suppressIsolatedSpikes = (values: Array<number | null>): Array<number | null> => {
-  const out = [...values];
-  for (let i = 1; i < values.length - 1; i += 1) {
-    const prev = values[i - 1];
-    const cur = values[i];
-    const next = values[i + 1];
-    if (prev === null || cur === null || next === null) continue;
-    const dPrev = Math.abs(centsDiff(cur, prev));
-    const dNext = Math.abs(centsDiff(cur, next));
-    if (dPrev > 300 && dNext > 300) {
-      out[i] = Math.sqrt(prev * next);
-    }
-  }
-  return out;
-};
-
-const movingAverageHz = (values: Array<number | null>, windowSize: number): Array<number | null> => {
-  if (windowSize <= 1) return [...values];
-  const half = Math.floor(windowSize / 2);
-  return values.map((value, index) => {
-    if (value === null) return null;
-    let sum = 0;
-    let count = 0;
-    for (let i = index - half; i <= index + half; i += 1) {
-      const candidate = values[i];
-      if (candidate === null) continue;
-      sum += candidate;
-      count += 1;
-    }
-    return count > 0 ? sum / count : null;
-  });
-};
-
-const highPass = (input: Float32Array, sampleRate: number, cutoffHz: number): Float32Array => {
-  const output = new Float32Array(input.length);
-  const rc = 1 / (2 * Math.PI * cutoffHz);
-  const dt = 1 / sampleRate;
-  const alpha = rc / (rc + dt);
-  let yPrev = 0;
-  let xPrev = input[0] ?? 0;
-  for (let i = 0; i < input.length; i += 1) {
-    const x = input[i];
-    const y = alpha * (yPrev + x - xPrev);
-    output[i] = y;
-    yPrev = y;
-    xPrev = x;
-  }
-  return output;
-};
-
-const extractPitch = (
-  mono: Float32Array,
-  sampleRate: number,
-  config: AnalysisConfig,
-): PitchFrame[] => {
-  const detector = PitchDetector.forFloat32Array(config.frameSize);
-  const filtered = highPass(mono, sampleRate, 70);
-  const hzSeries: Array<number | null> = [];
-  const claritySeries: number[] = [];
-  const timeSeries: number[] = [];
-
-  for (let start = 0; start + config.frameSize <= filtered.length; start += config.hopSize) {
-    const frame = filtered.subarray(start, start + config.frameSize);
-    const [hz, clarity] = detector.findPitch(frame, sampleRate);
-    const energy = rms(frame);
-    const valid =
-      Number.isFinite(hz) &&
-      clarity >= config.clarityThreshold &&
-      energy >= MIN_RMS &&
-      hz >= MIN_HZ &&
-      hz <= MAX_HZ;
-    const value = valid ? hz : null;
-    hzSeries.push(value);
-    claritySeries.push(clarity);
-    timeSeries.push(start / sampleRate);
-  }
-
-  const octaveFixed = octaveNormalize(hzSeries, MIN_HZ, MAX_HZ);
-  const despiked = suppressIsolatedSpikes(octaveFixed);
-  const medianSmoothed = applyMedianSmoothing(despiked, 7);
-  const smoothed = movingAverageHz(medianSmoothed, 5);
-  return smoothed.map((hz, i) => ({
-    timeSec: timeSeries[i],
-    hz,
-    clarity: claritySeries[i],
-  }));
 };
 
 const centsError = (userHz: number, refHz: number): number => 1200 * Math.log2(userHz / refHz);
@@ -280,17 +135,27 @@ const buildErrorSegments = (
 
 const finiteOrZero = (value: number): number => (Number.isFinite(value) ? value : 0);
 
-export const analyzePitch = (
+export const analyzePitch = async (
   refBuffer: AudioBuffer,
   userBuffer: AudioBuffer,
   config: AnalysisConfig,
   manualOffsetMs: number,
-): AnalysisResult => {
+): Promise<AnalysisResult> => {
   const refMono = mixToMono(refBuffer);
   const userMono = mixToMono(userBuffer);
 
-  const refPitch = extractPitch(refMono, refBuffer.sampleRate, config);
-  const userPitch = extractPitch(userMono, userBuffer.sampleRate, config);
+  const [rawRefPitch, rawUserPitch] = await Promise.all([
+    extractPitchByModel(refBuffer),
+    extractPitchByModel(userBuffer),
+  ]);
+  const refPitch = rawRefPitch.map((frame) => ({
+    ...frame,
+    hz: frame.clarity >= config.clarityThreshold ? frame.hz : null,
+  }));
+  const userPitch = rawUserPitch.map((frame) => ({
+    ...frame,
+    hz: frame.clarity >= config.clarityThreshold ? frame.hz : null,
+  }));
 
   const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
   const totalOffsetSec = (estimatedOffsetMs + manualOffsetMs) / 1000;

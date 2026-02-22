@@ -521,7 +521,7 @@ function App() {
     if (!selectedProject || !recordingRef.current) return;
 
     try {
-      setStatus('録音停止。解析中です...');
+      setStatus('録音停止。モデル解析中です（少し時間がかかります）...');
       stopAllPlayback();
 
       const recording = await recorderRef.current.stop();
@@ -536,7 +536,7 @@ function App() {
         decodeBlobToAudioBuffer(recording.blob),
       ]);
 
-      const analysisResult = analyzePitch(refBuffer, userBuffer, analysisConfig, 0);
+      const analysisResult = await analyzePitch(refBuffer, userBuffer, analysisConfig, 0);
 
       const session: Session = {
         id: createId(),
@@ -584,7 +584,7 @@ function App() {
         decodeBlobToAudioBuffer(analysisTrack.blob),
         decodeBlobToAudioBuffer(selectedSession.recording),
       ]);
-      const result = analyzePitch(refBuffer, userBuffer, analysisConfig, manualOffsetMs);
+      const result = await analyzePitch(refBuffer, userBuffer, analysisConfig, manualOffsetMs);
 
       const updatedSession: Session = {
         ...selectedSession,

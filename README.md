@@ -15,7 +15,7 @@
 ## 技術スタック
 - Vite + React + TypeScript (strict)
 - Web Audio API / MediaRecorder
-- pitchy（ピッチ検出）
+- Basic Pitch（機械学習ベースのピッチ推定） + Viterbi最適化
 - Canvas（ピッチ重ね描き）
 - IndexedDB（idb）
 
@@ -99,6 +99,7 @@ npm run build
 - スマホUIは未対応（PC優先）
 - 評価軸はピッチ中心（詳細なタイミング/安定性評価は未実装）
 - 長尺・高負荷環境では解析に時間がかかる
+- モデル推定のため初回解析はロード待ちが発生する
 - オフライン前提だが、Google Fonts読込のため初回のみネットワークがあると表示が安定
 
 ## データ取り扱い
