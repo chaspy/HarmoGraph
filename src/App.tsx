@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
+import { PianoRoll } from './components/PianoRoll';
 import { PitchCanvas } from './components/PitchCanvas';
 import { ReferenceWaveforms } from './components/ReferenceWaveforms';
+import { extractNoteEvents, playNoteEvents } from './lib/midiPreview';
+import type { NoteEvent } from './lib/midiPreview';
 import { analyzePitch, DEFAULT_ANALYSIS_CONFIG } from './lib/analyzer';
 import { decodeBlobToAudioBuffer } from './lib/audioUtils';
 import { Recorder } from './lib/recorder';
@@ -35,6 +38,11 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [manualOffsetMs, setManualOffsetMs] = useState(0);
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig>(DEFAULT_ANALYSIS_CONFIG);
+  const [previewNotes, setPreviewNotes] = useState<{ sessionId: string; notes: NoteEvent[] } | null>(
+    null,
+  );
+  const [noteCursorSec, setNoteCursorSec] = useState(0);
+  const [isNotePlaying, setIsNotePlaying] = useState(false);
 
   const recorderRef = useRef(new Recorder());
   const referenceRecorderRef = useRef(new Recorder());
@@ -49,6 +57,7 @@ function App() {
     startSec: number;
     endSec: number;
   } | null>(null);
+  const notePlaybackRef = useRef<{ stop: () => void } | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -88,6 +97,9 @@ function App() {
   const vocalUrl = useObjectUrl(vocalTrack?.blob);
   const chorusUrl = useObjectUrl(chorusTrack?.blob);
   const userRecordingUrl = useObjectUrl(selectedSession?.recording);
+  const currentPreviewNotes =
+    selectedSession && previewNotes?.sessionId === selectedSession.id ? previewNotes.notes : [];
+  const previewDurationSec = currentPreviewNotes.reduce((max, note) => Math.max(max, note.endSec), 1);
 
   useEffect(() => {
     void (async () => {
@@ -102,6 +114,13 @@ function App() {
   useEffect(() => {
     recordingRef.current = isRecording;
   }, [isRecording]);
+
+  useEffect(() => {
+    return () => {
+      notePlaybackRef.current?.stop();
+      notePlaybackRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (!selectedSession) {
@@ -275,6 +294,10 @@ function App() {
       audio.pause();
       audio.currentTime = 0;
     });
+    notePlaybackRef.current?.stop();
+    notePlaybackRef.current = null;
+    setIsNotePlaying(false);
+    setNoteCursorSec(0);
   };
 
   const resetReferencePlayback = (): void => {
@@ -610,6 +633,39 @@ function App() {
     }
   };
 
+  const generateMidiPreview = (): void => {
+    if (!selectedSession) return;
+    const notes = extractNoteEvents(selectedSession.analysisResult.userPitch);
+    setPreviewNotes({ sessionId: selectedSession.id, notes });
+    setNoteCursorSec(0);
+    setStatus(`ノート抽出: ${notes.length} ノートを生成しました。`);
+  };
+
+  const playMidiPreview = (): void => {
+    if (!selectedSession) return;
+    const notes = currentPreviewNotes;
+    if (notes.length === 0) {
+      setStatus('先に「ノート抽出」を実行してください。');
+      return;
+    }
+    notePlaybackRef.current?.stop();
+    setIsNotePlaying(true);
+    notePlaybackRef.current = playNoteEvents(
+      notes,
+      (sec) => setNoteCursorSec(sec),
+      () => {
+        notePlaybackRef.current = null;
+        setIsNotePlaying(false);
+      },
+    );
+  };
+
+  const stopMidiPreview = (): void => {
+    notePlaybackRef.current?.stop();
+    notePlaybackRef.current = null;
+    setIsNotePlaying(false);
+  };
+
   const refDetectedCount = selectedSession
     ? selectedSession.analysisResult.refPitch.filter((frame) => frame.hz !== null).length
     : 0;
@@ -937,6 +993,29 @@ function App() {
                       </li>
                     ))}
                   </ul>
+                </div>
+
+                <div className="card-subsection">
+                  <h4>MIDIプレビュー（録音→ノート化）</h4>
+                  <div className="controls-row">
+                    <button type="button" onClick={generateMidiPreview}>
+                      ノート抽出
+                    </button>
+                    <button type="button" disabled={currentPreviewNotes.length === 0} onClick={playMidiPreview}>
+                      ピアノ再生
+                    </button>
+                    <button type="button" disabled={!isNotePlaying} onClick={stopMidiPreview}>
+                      停止
+                    </button>
+                    <strong>
+                      ノート数: {currentPreviewNotes.length} / 再生位置: {formatSec(noteCursorSec)}
+                    </strong>
+                  </div>
+                  <PianoRoll
+                    notes={currentPreviewNotes}
+                    durationSec={previewDurationSec}
+                    cursorSec={noteCursorSec}
+                  />
                 </div>
               </section>
             )}
