@@ -104,14 +104,6 @@ button.danger {
   gap: 14px;
 }
 
-.status {
-  border: 1px solid #bfdbfe;
-  background: #eff6ff;
-  padding: 10px;
-  border-radius: 10px;
-  font-size: 14px;
-}
-
 .card {
   background: var(--panel);
   border: 1px solid var(--line);

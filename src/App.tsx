@@ -578,6 +578,9 @@ function App() {
 
       await persistProject(nextProject);
       setActiveSessionId(session.id);
+      const notes = extractNoteEvents(session.analysisResult.userPitch);
+      setPreviewNotes({ sessionId: session.id, notes });
+      await saveDebugSnapshot(session, notes, 'analyze');
       setStatus('解析が完了しました。グラフと統計を確認してください。');
     } catch (error) {
       const message = error instanceof Error ? error.message : '録音停止に失敗しました';
@@ -622,6 +625,9 @@ function App() {
         ),
       };
       await persistProject(nextProject);
+      const notes = extractNoteEvents(updatedSession.analysisResult.userPitch);
+      setPreviewNotes({ sessionId: updatedSession.id, notes });
+      await saveDebugSnapshot(updatedSession, notes, 'reanalyze');
       setStatus('再解析が完了しました。');
     } catch (error) {
       const message = error instanceof Error ? error.message : '再解析に失敗しました';
@@ -654,12 +660,13 @@ function App() {
     }
   };
 
-  const generateMidiPreview = (): void => {
+  const generateMidiPreview = async (): Promise<void> => {
     if (!selectedSession) return;
     const notes = extractNoteEvents(selectedSession.analysisResult.userPitch);
     setPreviewNotes({ sessionId: selectedSession.id, notes });
     setNoteCursorSec(0);
-    setStatus(`ノート抽出: ${notes.length} ノートを生成しました。`);
+    await saveDebugSnapshot(selectedSession, notes, 'note_extract');
+    setStatus(`ノート抽出: ${notes.length} ノートを生成し、debugに自動保存しました。`);
   };
 
   const playMidiPreview = (): void => {
@@ -687,51 +694,48 @@ function App() {
     setIsNotePlaying(false);
   };
 
-  const exportNoteDebugJson = (): void => {
-    if (!selectedProject || !selectedSession) {
-      setStatus('デバッグ書き出し対象のセッションがありません。');
-      return;
-    }
-
-    const notes =
-      currentPreviewNotes.length > 0
-        ? currentPreviewNotes
-        : extractNoteEvents(selectedSession.analysisResult.userPitch);
-
+  const saveDebugSnapshot = async (
+    session: Session,
+    notes: NoteEvent[],
+    reason: 'analyze' | 'reanalyze' | 'note_extract',
+  ): Promise<void> => {
+    if (!selectedProject) return;
     const payload = {
       exportedAt: new Date().toISOString(),
+      reason,
       project: {
         id: selectedProject.id,
         name: selectedProject.name,
       },
       session: {
-        id: selectedSession.id,
-        createdAt: selectedSession.createdAt,
-        durationSec: selectedSession.durationSec,
-        manualOffsetMs: selectedSession.manualOffsetMs,
-        analysisReferenceRole: selectedSession.analysisReferenceRole ?? 'vocal',
+        id: session.id,
+        createdAt: session.createdAt,
+        durationSec: session.durationSec,
+        manualOffsetMs: session.manualOffsetMs,
+        analysisReferenceRole: session.analysisReferenceRole ?? 'vocal',
       },
-      config: selectedSession.analysisConfig,
-      stats: selectedSession.analysisResult.stats,
-      estimatedOffsetMs: selectedSession.analysisResult.estimatedOffsetMs,
+      config: session.analysisConfig,
+      stats: session.analysisResult.stats,
+      estimatedOffsetMs: session.analysisResult.estimatedOffsetMs,
       input: {
-        refPitch: selectedSession.analysisResult.refPitch,
-        userPitch: selectedSession.analysisResult.userPitch,
-        errorFrames: selectedSession.analysisResult.errorFrames,
+        refPitch: session.analysisResult.refPitch,
+        userPitch: session.analysisResult.userPitch,
+        errorFrames: session.analysisResult.errorFrames,
       },
       output: {
         notes,
       },
     };
 
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `harmograph-debug-${selectedProject.name}-${selectedSession.id}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setStatus(`デバッグJSONを書き出しました（notes: ${notes.length}）。`);
+    try {
+      await fetch('/__debug/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      console.warn('debug save failed', error);
+    }
   };
 
   const refDetectedCount = selectedSession
@@ -784,8 +788,6 @@ function App() {
       </aside>
 
       <main className="main-panel">
-        <div className="status">{status}</div>
-
         {!selectedProject ? (
           <section className="card">曲を作成すると練習を開始できます。</section>
         ) : (
@@ -1072,7 +1074,7 @@ function App() {
                 <div className="card-subsection">
                   <h4>MIDIプレビュー（録音→ノート化）</h4>
                   <div className="controls-row">
-                    <button type="button" onClick={generateMidiPreview}>
+                    <button type="button" onClick={() => void generateMidiPreview()}>
                       ノート抽出
                     </button>
                     <button type="button" disabled={currentPreviewNotes.length === 0} onClick={playMidiPreview}>
@@ -1080,9 +1082,6 @@ function App() {
                     </button>
                     <button type="button" disabled={!isNotePlaying} onClick={stopMidiPreview}>
                       停止
-                    </button>
-                    <button type="button" onClick={exportNoteDebugJson}>
-                      デバッグJSON出力
                     </button>
                     <strong>
                       ノート数: {currentPreviewNotes.length} / 再生位置: {formatSec(noteCursorSec)}
