@@ -166,6 +166,17 @@ button.danger {
   flex-wrap: wrap;
 }
 
+.click-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.click-controls input[type='number'],
+.click-controls select {
+  width: 88px;
+}
+
 .playback-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

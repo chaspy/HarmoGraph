@@ -21,6 +21,16 @@ interface ReferenceWaveformsProps {
   onSeek: (timelineSec: number) => void;
   onVocalOffsetChange: (offsetMs: number) => void;
   onChorusOffsetChange: (offsetMs: number) => void;
+  clickEnabled: boolean;
+  clickVolume: number;
+  bpm: number;
+  beatsPerBar: number;
+  clickOffsetMs: number;
+  onClickEnabledChange: (enabled: boolean) => void;
+  onClickVolumeChange: (value: number) => void;
+  onBpmChange: (value: number) => void;
+  onBeatsPerBarChange: (value: number) => void;
+  onClickOffsetMsChange: (value: number) => void;
 }
 
 const WAVE_WIDTH = 1000;
@@ -120,6 +130,16 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
     onSeek,
     onVocalOffsetChange,
     onChorusOffsetChange,
+    clickEnabled,
+    clickVolume,
+    bpm,
+    beatsPerBar,
+    clickOffsetMs,
+    onClickEnabledChange,
+    onClickVolumeChange,
+    onBpmChange,
+    onBeatsPerBarChange,
+    onClickOffsetMsChange,
   } = props;
 
   const [vocalWave, setVocalWave] = useState<TrackWave | null>(null);
@@ -230,7 +250,7 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
       <h3>参照トラック位置合わせ</h3>
       <p>波形を見ながら、再生中にms単位で位置調整できます。</p>
 
-      <div className="controls-row">
+      <div className="controls-row click-controls">
         <button type="button" onClick={onPlay}>
           再生
         </button>
@@ -242,6 +262,58 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
         </button>
         <strong>{isPlaying ? '再生中' : '停止中'} / 再生位置: {formatSec(cursorSec)}</strong>
       </div>
+
+      <div className="controls-row">
+        <label>
+          <input
+            checked={clickEnabled}
+            type="checkbox"
+            onChange={(event) => onClickEnabledChange(event.target.checked)}
+          />{' '}
+          クリックON
+        </label>
+        <label>
+          BPM
+          <input
+            type="number"
+            min={40}
+            max={240}
+            step={0.1}
+            value={bpm}
+            onChange={(event) => onBpmChange(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          拍子
+          <select value={beatsPerBar} onChange={(event) => onBeatsPerBarChange(Number(event.target.value))}>
+            <option value={3}>3/4</option>
+            <option value={4}>4/4</option>
+          </select>
+        </label>
+        <label>
+          クリック音量 {Math.round(clickVolume * 100)}%
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={clickVolume}
+            onChange={(event) => onClickVolumeChange(Number(event.target.value))}
+          />
+        </label>
+      </div>
+
+      <label className="offset-slider">
+        クリックオフセット: {clickOffsetMs} ms
+        <input
+          type="range"
+          min={-500}
+          max={500}
+          step={5}
+          value={clickOffsetMs}
+          onChange={(event) => onClickOffsetMsChange(Number(event.target.value))}
+        />
+      </label>
 
       <label className="offset-slider">
         シーク

@@ -16,6 +16,7 @@ import type { AnalysisConfig, PlaybackState, Project, Session, StoredTrack, Trac
 
 const MAX_SONG_SEC = 600;
 const WARN_SONG_SEC = 300;
+const DEFAULT_BPM = 120;
 
 const defaultPlayback: PlaybackState = {
   vocalEnabled: true,
@@ -37,6 +38,11 @@ function App() {
   const [referenceRecordingRole, setReferenceRecordingRole] = useState<TrackRole | null>(null);
   const [referenceCursorSec, setReferenceCursorSec] = useState(0);
   const [isReferencePlaying, setIsReferencePlaying] = useState(false);
+  const [clickEnabled, setClickEnabled] = useState(true);
+  const [clickVolume, setClickVolume] = useState(0.35);
+  const [bpm, setBpm] = useState(DEFAULT_BPM);
+  const [beatsPerBar, setBeatsPerBar] = useState(4);
+  const [clickOffsetMs, setClickOffsetMs] = useState(0);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [manualOffsetMs, setManualOffsetMs] = useState(0);
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig>(DEFAULT_ANALYSIS_CONFIG);
@@ -57,6 +63,7 @@ function App() {
   const userAudioRef = useRef<HTMLAudioElement | null>(null);
   const referenceTimeoutIdsRef = useRef<number[]>([]);
   const referenceRafRef = useRef<number | null>(null);
+  const metronomeContextRef = useRef<AudioContext | null>(null);
   const referencePlayAnchorRef = useRef<{
     startedAtMs: number;
     startSec: number;
@@ -143,6 +150,8 @@ function App() {
     return () => {
       notePlaybackRef.current?.stop();
       notePlaybackRef.current = null;
+      metronomeContextRef.current?.close().catch(() => {});
+      metronomeContextRef.current = null;
       if (toastTimerRef.current !== null) {
         window.clearTimeout(toastTimerRef.current);
       }
@@ -316,6 +325,8 @@ function App() {
     referencePlayAnchorRef.current = null;
     setIsReferencePlaying(false);
     setReferenceCursorSec(0);
+    metronomeContextRef.current?.close().catch(() => {});
+    metronomeContextRef.current = null;
     [vocalAudioRef.current, chorusAudioRef.current, userAudioRef.current].forEach((audio) => {
       if (!audio) return;
       audio.pause();
@@ -337,6 +348,8 @@ function App() {
     referencePlayAnchorRef.current = null;
     setIsReferencePlaying(false);
     setReferenceCursorSec(0);
+    metronomeContextRef.current?.close().catch(() => {});
+    metronomeContextRef.current = null;
     const vocal = vocalAudioRef.current;
     const chorus = chorusAudioRef.current;
     if (vocal) {
@@ -415,6 +428,8 @@ function App() {
     setReferenceCursorSec(Math.max(0, timelineSec));
     referencePlayAnchorRef.current = null;
     setIsReferencePlaying(false);
+    metronomeContextRef.current?.close().catch(() => {});
+    metronomeContextRef.current = null;
     [vocalAudioRef.current, chorusAudioRef.current].forEach((audio) => {
       if (!audio) return;
       audio.pause();
@@ -434,6 +449,8 @@ function App() {
     referenceTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
     referenceTimeoutIdsRef.current = [];
     [vocalAudioRef.current, chorusAudioRef.current].forEach((audio) => audio?.pause());
+    metronomeContextRef.current?.close().catch(() => {});
+    metronomeContextRef.current = null;
 
     const playTrack = (
       audio: HTMLAudioElement | null,
@@ -452,6 +469,45 @@ function App() {
 
     playTrack(vocalAudioRef.current, Boolean(vocalUrl), vocalOffsetSec);
     playTrack(chorusAudioRef.current, Boolean(chorusUrl), chorusOffsetSec);
+
+    if (clickEnabled) {
+      const context = new AudioContext();
+      if (context.state === 'suspended') {
+        await context.resume().catch(() => {});
+      }
+      const beatSec = 60 / Math.max(1, bpm);
+      const clickOffsetSec = clickOffsetMs / 1000;
+      const firstBeatIndex = Math.ceil((startSec - clickOffsetSec) / beatSec);
+      const scheduledStart = context.currentTime;
+      for (let beatIndex = firstBeatIndex; ; beatIndex += 1) {
+        const beatTimeSec = clickOffsetSec + beatIndex * beatSec;
+        if (beatTimeSec > endSec + 0.0001) break;
+        const delaySec = beatTimeSec - startSec;
+        if (delaySec < -0.01) continue;
+
+        const accent = ((beatIndex % beatsPerBar) + beatsPerBar) % beatsPerBar === 0;
+        const osc = context.createOscillator();
+        const gain = context.createGain();
+        osc.type = accent ? 'triangle' : 'sine';
+        osc.frequency.setValueAtTime(accent ? 1680 : 1120, scheduledStart + Math.max(0, delaySec));
+        const velocity = clickVolume * (accent ? 1 : 0.72);
+        gain.gain.setValueAtTime(0.0001, scheduledStart + Math.max(0, delaySec));
+        gain.gain.exponentialRampToValueAtTime(
+          Math.max(0.0001, velocity),
+          scheduledStart + Math.max(0, delaySec) + 0.003,
+        );
+        gain.gain.exponentialRampToValueAtTime(
+          0.0001,
+          scheduledStart + Math.max(0, delaySec) + 0.055,
+        );
+        osc.connect(gain);
+        gain.connect(context.destination);
+        osc.start(scheduledStart + Math.max(0, delaySec));
+        osc.stop(scheduledStart + Math.max(0, delaySec) + 0.06);
+      }
+      metronomeContextRef.current = context;
+    }
+
     referencePlayAnchorRef.current = {
       startedAtMs: performance.now(),
       startSec,
@@ -483,6 +539,8 @@ function App() {
       if (!vocalActive && !chorusActive && anchor && timeline >= anchor.endSec - 0.01) {
         referencePlayAnchorRef.current = null;
         setIsReferencePlaying(false);
+        metronomeContextRef.current?.close().catch(() => {});
+        metronomeContextRef.current = null;
         return;
       }
 
@@ -896,6 +954,46 @@ function App() {
               onSeek={seekReference}
               onVocalOffsetChange={(offset) => void changeReferenceOffset('vocal', offset)}
               onChorusOffsetChange={(offset) => void changeReferenceOffset('chorus', offset)}
+              clickEnabled={clickEnabled}
+              clickVolume={clickVolume}
+              bpm={bpm}
+              beatsPerBar={beatsPerBar}
+              clickOffsetMs={clickOffsetMs}
+              onClickEnabledChange={(enabled) => {
+                setClickEnabled(enabled);
+                if (isReferencePlaying) {
+                  const timelineSec = computeReferenceTimelineSec();
+                  void playReference(timelineSec);
+                }
+              }}
+              onClickVolumeChange={(value) => {
+                setClickVolume(clamp(value, 0, 1));
+                if (isReferencePlaying) {
+                  const timelineSec = computeReferenceTimelineSec();
+                  void playReference(timelineSec);
+                }
+              }}
+              onBpmChange={(value) => {
+                setBpm(clamp(Number.isFinite(value) ? value : DEFAULT_BPM, 40, 240));
+                if (isReferencePlaying) {
+                  const timelineSec = computeReferenceTimelineSec();
+                  void playReference(timelineSec);
+                }
+              }}
+              onBeatsPerBarChange={(value) => {
+                setBeatsPerBar(value === 3 ? 3 : 4);
+                if (isReferencePlaying) {
+                  const timelineSec = computeReferenceTimelineSec();
+                  void playReference(timelineSec);
+                }
+              }}
+              onClickOffsetMsChange={(value) => {
+                setClickOffsetMs(clamp(Math.round(value), -500, 500));
+                if (isReferencePlaying) {
+                  const timelineSec = computeReferenceTimelineSec();
+                  void playReference(timelineSec);
+                }
+              }}
             />
 
             <section className="card">
