@@ -11,7 +11,7 @@ import { median } from './utils';
 
 export const DEFAULT_ANALYSIS_CONFIG: AnalysisConfig = {
   toleranceCents: 25,
-  clarityThreshold: 0.6,
+  clarityThreshold: 0.5,
   frameSize: 2048,
   hopSize: 512,
 };

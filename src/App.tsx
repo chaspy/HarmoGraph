@@ -30,6 +30,7 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [referenceRecordingRole, setReferenceRecordingRole] = useState<TrackRole | null>(null);
+  const [analysisReferenceRole, setAnalysisReferenceRole] = useState<TrackRole>('chorus');
   const [referenceCursorSec, setReferenceCursorSec] = useState(0);
   const [isReferencePlaying, setIsReferencePlaying] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -88,6 +89,7 @@ function App() {
   const vocalUrl = useObjectUrl(vocalTrack?.blob);
   const chorusUrl = useObjectUrl(chorusTrack?.blob);
   const userRecordingUrl = useObjectUrl(selectedSession?.recording);
+  const sessionReferenceRole: TrackRole = selectedSession?.analysisReferenceRole ?? 'chorus';
 
   useEffect(() => {
     void (async () => {
@@ -110,7 +112,17 @@ function App() {
     }
     setManualOffsetMs(selectedSession.manualOffsetMs);
     setAnalysisConfig(selectedSession.analysisConfig);
+    setAnalysisReferenceRole(selectedSession.analysisReferenceRole ?? 'chorus');
   }, [selectedSession]);
+
+  useEffect(() => {
+    if (analysisReferenceRole === 'chorus' && !chorusTrack && vocalTrack) {
+      setAnalysisReferenceRole('vocal');
+    }
+    if (analysisReferenceRole === 'vocal' && !vocalTrack && chorusTrack) {
+      setAnalysisReferenceRole('chorus');
+    }
+  }, [analysisReferenceRole, chorusTrack, vocalTrack]);
 
   useEffect(() => {
     const vocal = vocalAudioRef.current;
@@ -450,8 +462,11 @@ function App() {
 
   const startPractice = async (): Promise<void> => {
     if (!selectedProject) return;
-    if (!chorusTrack) {
-      setStatus('練習前に参照コーラス音源をアップロードまたは録音してください。');
+    const analysisTrack = getTrack(analysisReferenceRole);
+    if (!analysisTrack) {
+      setStatus(
+        `練習前に解析参照トラック（${analysisReferenceRole === 'vocal' ? 'ボーカル' : 'コーラス'}）を登録してください。`,
+      );
       return;
     }
     if (referenceRecordingRole) {
@@ -501,13 +516,14 @@ function App() {
       stopAllPlayback();
 
       const recording = await recorderRef.current.stop();
-      if (!chorusTrack) {
-        setStatus('参照コーラスが見つからず解析できませんでした。');
+      const analysisTrack = getTrack(analysisReferenceRole);
+      if (!analysisTrack) {
+        setStatus('解析参照トラックが見つからず解析できませんでした。');
         return;
       }
 
       const [refBuffer, userBuffer] = await Promise.all([
-        decodeBlobToAudioBuffer(chorusTrack.blob),
+        decodeBlobToAudioBuffer(analysisTrack.blob),
         decodeBlobToAudioBuffer(recording.blob),
       ]);
 
@@ -519,6 +535,7 @@ function App() {
         recording: recording.blob,
         recordingMimeType: recording.mimeType,
         durationSec: recording.durationSec,
+        analysisReferenceRole,
         manualOffsetMs: 0,
         analysisConfig,
         analysisResult,
@@ -542,21 +559,29 @@ function App() {
   };
 
   const reanalyzeCurrentSession = async (): Promise<void> => {
-    if (!selectedProject || !selectedSession || !chorusTrack) {
+    if (!selectedProject || !selectedSession) {
       setStatus('再解析に必要なデータが不足しています。');
+      return;
+    }
+    const analysisTrack = getTrack(sessionReferenceRole);
+    if (!analysisTrack) {
+      setStatus(
+        `参照${sessionReferenceRole === 'vocal' ? 'ボーカル' : 'コーラス'}がないため再解析できません。`,
+      );
       return;
     }
 
     try {
       setStatus('オフセットを反映して再解析中...');
       const [refBuffer, userBuffer] = await Promise.all([
-        decodeBlobToAudioBuffer(chorusTrack.blob),
+        decodeBlobToAudioBuffer(analysisTrack.blob),
         decodeBlobToAudioBuffer(selectedSession.recording),
       ]);
       const result = analyzePitch(refBuffer, userBuffer, analysisConfig, manualOffsetMs);
 
       const updatedSession: Session = {
         ...selectedSession,
+        analysisReferenceRole: sessionReferenceRole,
         manualOffsetMs,
         analysisConfig,
         analysisResult: result,
@@ -600,6 +625,15 @@ function App() {
       void user.play();
     }
   };
+
+  const refDetectedCount = selectedSession
+    ? selectedSession.analysisResult.refPitch.filter((frame) => frame.hz !== null).length
+    : 0;
+  const userDetectedCount = selectedSession
+    ? selectedSession.analysisResult.userPitch.filter((frame) => frame.hz !== null).length
+    : 0;
+  const refTotalCount = selectedSession ? selectedSession.analysisResult.refPitch.length : 0;
+  const userTotalCount = selectedSession ? selectedSession.analysisResult.userPitch.length : 0;
 
   return (
     <div className="app-shell">
@@ -723,6 +757,18 @@ function App() {
               <h3>練習セッション</h3>
               <p>2秒カウント後に参照再生しながら録音します。</p>
               <div className="controls-row">
+                <label>
+                  解析参照:
+                  <select
+                    value={analysisReferenceRole}
+                    onChange={(event) => setAnalysisReferenceRole(event.target.value as TrackRole)}
+                  >
+                    <option value="chorus">コーラス</option>
+                    <option value="vocal">ボーカル</option>
+                  </select>
+                </label>
+              </div>
+              <div className="controls-row">
                 <button
                   type="button"
                   disabled={isRecording || referenceRecordingRole !== null}
@@ -821,6 +867,10 @@ function App() {
             {selectedSession && (
               <section className="card">
                 <h3>解析結果</h3>
+                <p>
+                  解析参照トラック: {sessionReferenceRole === 'vocal' ? 'ボーカル' : 'コーラス'} / 参照検出{' '}
+                  {refDetectedCount}/{refTotalCount} / 自分検出 {userDetectedCount}/{userTotalCount}
+                </p>
                 <div className="analysis-controls">
                   <label>
                     許容誤差 ±{analysisConfig.toleranceCents.toFixed(0)} cents

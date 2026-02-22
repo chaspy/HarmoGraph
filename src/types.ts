@@ -57,6 +57,7 @@ export interface Session {
   recording: Blob;
   recordingMimeType: string;
   durationSec: number;
+  analysisReferenceRole?: TrackRole;
   manualOffsetMs: number;
   analysisConfig: AnalysisConfig;
   analysisResult: AnalysisResult;
