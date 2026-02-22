@@ -29,6 +29,7 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
   const [status, setStatus] = useState('ローカル起動中。マイクは練習開始時に許可してください。');
+  const [toastVisible, setToastVisible] = useState(true);
   const [playback, setPlayback] = useState<PlaybackState>(defaultPlayback);
   const [isRecording, setIsRecording] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -58,6 +59,7 @@ function App() {
     endSec: number;
   } | null>(null);
   const notePlaybackRef = useRef<{ stop: () => void } | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -116,9 +118,28 @@ function App() {
   }, [isRecording]);
 
   useEffect(() => {
+    setToastVisible(true);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    const isOngoing =
+      status.includes('中') || status.includes('待機') || status.includes('解析') || status.includes('録音');
+    if (!isOngoing) {
+      toastTimerRef.current = window.setTimeout(() => {
+        setToastVisible(false);
+        toastTimerRef.current = null;
+      }, 4200);
+    }
+  }, [status]);
+
+  useEffect(() => {
     return () => {
       notePlaybackRef.current?.stop();
       notePlaybackRef.current = null;
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
     };
   }, []);
 
@@ -666,6 +687,53 @@ function App() {
     setIsNotePlaying(false);
   };
 
+  const exportNoteDebugJson = (): void => {
+    if (!selectedProject || !selectedSession) {
+      setStatus('デバッグ書き出し対象のセッションがありません。');
+      return;
+    }
+
+    const notes =
+      currentPreviewNotes.length > 0
+        ? currentPreviewNotes
+        : extractNoteEvents(selectedSession.analysisResult.userPitch);
+
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      project: {
+        id: selectedProject.id,
+        name: selectedProject.name,
+      },
+      session: {
+        id: selectedSession.id,
+        createdAt: selectedSession.createdAt,
+        durationSec: selectedSession.durationSec,
+        manualOffsetMs: selectedSession.manualOffsetMs,
+        analysisReferenceRole: selectedSession.analysisReferenceRole ?? 'vocal',
+      },
+      config: selectedSession.analysisConfig,
+      stats: selectedSession.analysisResult.stats,
+      estimatedOffsetMs: selectedSession.analysisResult.estimatedOffsetMs,
+      input: {
+        refPitch: selectedSession.analysisResult.refPitch,
+        userPitch: selectedSession.analysisResult.userPitch,
+        errorFrames: selectedSession.analysisResult.errorFrames,
+      },
+      output: {
+        notes,
+      },
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `harmograph-debug-${selectedProject.name}-${selectedSession.id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus(`デバッグJSONを書き出しました（notes: ${notes.length}）。`);
+  };
+
   const refDetectedCount = selectedSession
     ? selectedSession.analysisResult.refPitch.filter((frame) => frame.hz !== null).length
     : 0;
@@ -677,6 +745,11 @@ function App() {
 
   return (
     <div className="app-shell">
+      {toastVisible && (
+        <div aria-live="polite" className="status-toast" role="status">
+          {status}
+        </div>
+      )}
       <aside className="sidebar">
         <h1>HarmoGraph</h1>
         <p className="caption">ローカル専用 / オフライン動作 / マイク権限が必要</p>
@@ -1006,6 +1079,9 @@ function App() {
                     </button>
                     <button type="button" disabled={!isNotePlaying} onClick={stopMidiPreview}>
                       停止
+                    </button>
+                    <button type="button" onClick={exportNoteDebugJson}>
+                      デバッグJSON出力
                     </button>
                     <strong>
                       ノート数: {currentPreviewNotes.length} / 再生位置: {formatSec(noteCursorSec)}
