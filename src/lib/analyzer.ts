@@ -135,6 +135,8 @@ const buildErrorSegments = (
 };
 
 const finiteOrZero = (value: number): number => (Number.isFinite(value) ? value : 0);
+const hzToMidi = (hz: number): number => 69 + 12 * Math.log2(hz / 440);
+const midiToHz = (midi: number): number => 440 * 2 ** ((midi - 69) / 12);
 
 const quantizePitchToRhythmGrid = (frames: PitchFrame[], rhythm: RhythmConfig): PitchFrame[] => {
   if (frames.length === 0) return [];
@@ -182,6 +184,79 @@ const quantizePitchToRhythmGrid = (frames: PitchFrame[], rhythm: RhythmConfig): 
   return out.filter((frame) => frame.timeSec >= 0 && frame.timeSec <= endSec + stepSec);
 };
 
+const fillShortNullGaps = (
+  frames: PitchFrame[],
+  maxGapCells = 2,
+  maxSemitoneDiff = 2,
+): PitchFrame[] => {
+  const out = frames.map((frame) => ({ ...frame }));
+  let i = 0;
+  while (i < out.length) {
+    if (out[i].hz !== null) {
+      i += 1;
+      continue;
+    }
+    const start = i;
+    while (i < out.length && out[i].hz === null) i += 1;
+    const end = i - 1;
+    const gap = end - start + 1;
+    if (gap > maxGapCells) continue;
+
+    const prev = start > 0 ? out[start - 1] : null;
+    const next = i < out.length ? out[i] : null;
+    if (!prev || !next || prev.hz === null || next.hz === null) continue;
+
+    const prevMidi = hzToMidi(prev.hz);
+    const nextMidi = hzToMidi(next.hz);
+    if (Math.abs(prevMidi - nextMidi) > maxSemitoneDiff) continue;
+
+    for (let k = 0; k < gap; k += 1) {
+      const ratio = (k + 1) / (gap + 1);
+      const midi = prevMidi * (1 - ratio) + nextMidi * ratio;
+      out[start + k] = {
+        ...out[start + k],
+        hz: midiToHz(midi),
+        clarity: Math.min(prev.clarity, next.clarity) * 0.9,
+      };
+    }
+  }
+  return out;
+};
+
+const holdVoicingOnReferenceCells = (
+  userFrames: PitchFrame[],
+  refFrames: PitchFrame[],
+  maxHoldCells = 1,
+): PitchFrame[] => {
+  const out = userFrames.map((frame) => ({ ...frame }));
+  let hold = 0;
+  for (let i = 0; i < out.length; i += 1) {
+    const user = out[i];
+    const ref = refFrames[i];
+    if (!user || user.hz !== null) {
+      hold = 0;
+      continue;
+    }
+    if (!ref || ref.hz === null) {
+      hold = 0;
+      continue;
+    }
+    const prev = i > 0 ? out[i - 1] : null;
+    const prevHz = prev?.hz ?? null;
+    if (prevHz !== null && prev && hold < maxHoldCells) {
+      out[i] = {
+        ...user,
+        hz: prevHz,
+        clarity: Math.max(0.15, prev.clarity * 0.8),
+      };
+      hold += 1;
+    } else {
+      hold = 0;
+    }
+  }
+  return out;
+};
+
 export const analyzePitch = async (
   refBuffer: AudioBuffer,
   userBuffer: AudioBuffer,
@@ -205,7 +280,8 @@ export const analyzePitch = async (
     hz: frame.clarity >= config.clarityThreshold ? frame.hz : null,
   }));
   const refPitch = quantizePitchToRhythmGrid(refVoiced, rhythm);
-  const userPitch = quantizePitchToRhythmGrid(userVoiced, rhythm);
+  const userGrid = quantizePitchToRhythmGrid(userVoiced, rhythm);
+  const userPitch = holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 2, 2), refPitch, 1);
 
   const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
   const totalOffsetSec = (estimatedOffsetMs + manualOffsetMs) / 1000;
