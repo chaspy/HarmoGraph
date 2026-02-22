@@ -69,6 +69,15 @@ const medianFilter = (values: Array<number | null>, windowSize: number): Array<n
   });
 };
 
+const segmentMedianMidi = (frames: PitchFrame[], startSec: number, endSec: number): number | null => {
+  const values = frames
+    .filter((frame) => frame.hz !== null && frame.timeSec >= startSec && frame.timeSec < endSec)
+    .map((frame) => hzToMidi(frame.hz as number));
+  if (values.length === 0) return null;
+  values.sort((a, b) => a - b);
+  return Math.round(values[Math.floor(values.length / 2)]);
+};
+
 export const extractNoteEvents = (
   frames: PitchFrame[],
   options?: NoteExtractionOptions,
@@ -282,6 +291,39 @@ const buildDebugScore = (frames: PitchFrame[], notes: NoteEvent[]): NoteExtracti
   };
 };
 
+const densifyNotes = (frames: PitchFrame[], notes: NoteEvent[], targetCount: number): NoteEvent[] => {
+  if (notes.length === 0 || notes.length >= targetCount) return notes;
+
+  const maxChunkSec = 0.14;
+  const out: NoteEvent[] = [];
+  for (const note of notes) {
+    if (out.length >= targetCount) {
+      out.push(note);
+      continue;
+    }
+    const duration = Math.max(0, note.endSec - note.startSec);
+    const remain = targetCount - out.length;
+    const desiredCuts = Math.min(remain, Math.max(1, Math.ceil(duration / maxChunkSec)));
+    if (desiredCuts <= 1 || duration < maxChunkSec * 1.2) {
+      out.push(note);
+      continue;
+    }
+
+    for (let i = 0; i < desiredCuts; i += 1) {
+      const segStart = note.startSec + (duration * i) / desiredCuts;
+      const segEnd = note.startSec + (duration * (i + 1)) / desiredCuts;
+      const midi = segmentMedianMidi(frames, segStart, segEnd) ?? note.midi;
+      out.push({
+        midi,
+        startSec: segStart,
+        endSec: segEnd,
+        velocity: note.velocity,
+      });
+    }
+  }
+  return out;
+};
+
 export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResult => {
   const minDurationSecSet = [0.015, 0.02, 0.03, 0.04];
   const medianWindowSet = [5, 7, 9];
@@ -366,6 +408,16 @@ export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResu
       bestNotes = aggressiveNotes;
       bestOptions = aggressive;
       bestDebug = aggressiveDebug;
+    }
+  }
+
+  if (bestNotes.length < targetNoteCount * 0.9) {
+    const densified = densifyNotes(frames, bestNotes, Math.round(targetNoteCount));
+    const densifiedDebug = buildDebugScore(frames, densified);
+    tried += 1;
+    if (densifiedDebug.score >= bestDebug.score - 28 && densifiedDebug.noteCount > bestDebug.noteCount) {
+      bestNotes = densified;
+      bestDebug = densifiedDebug;
     }
   }
 
