@@ -285,8 +285,8 @@ const guidedReferenceFill = (
   userFrames: PitchFrame[],
   refFrames: PitchFrame[],
   sourceFrames: PitchFrame[],
-  radiusCells = 12,
-  maxRefJumpCents = 480,
+  radiusCells = 30,
+  maxRefJumpCents = 1200,
 ): PitchFrame[] => {
   const out = userFrames.map((frame) => ({ ...frame }));
   for (let i = 0; i < out.length; i += 1) {
@@ -353,8 +353,8 @@ export const analyzePitch = async (
     ),
     refPitch,
     userGrid,
-    12,
-    480,
+    30,
+    1200,
   );
 
   const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
