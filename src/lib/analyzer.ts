@@ -106,18 +106,36 @@ const movingAverageHz = (values: Array<number | null>, windowSize: number): Arra
   });
 };
 
+const highPass = (input: Float32Array, sampleRate: number, cutoffHz: number): Float32Array => {
+  const output = new Float32Array(input.length);
+  const rc = 1 / (2 * Math.PI * cutoffHz);
+  const dt = 1 / sampleRate;
+  const alpha = rc / (rc + dt);
+  let yPrev = 0;
+  let xPrev = input[0] ?? 0;
+  for (let i = 0; i < input.length; i += 1) {
+    const x = input[i];
+    const y = alpha * (yPrev + x - xPrev);
+    output[i] = y;
+    yPrev = y;
+    xPrev = x;
+  }
+  return output;
+};
+
 const extractPitch = (
   mono: Float32Array,
   sampleRate: number,
   config: AnalysisConfig,
 ): PitchFrame[] => {
   const detector = PitchDetector.forFloat32Array(config.frameSize);
+  const filtered = highPass(mono, sampleRate, 70);
   const hzSeries: Array<number | null> = [];
   const claritySeries: number[] = [];
   const timeSeries: number[] = [];
 
-  for (let start = 0; start + config.frameSize <= mono.length; start += config.hopSize) {
-    const frame = mono.subarray(start, start + config.frameSize);
+  for (let start = 0; start + config.frameSize <= filtered.length; start += config.hopSize) {
+    const frame = filtered.subarray(start, start + config.frameSize);
     const [hz, clarity] = detector.findPitch(frame, sampleRate);
     const energy = rms(frame);
     const valid =
