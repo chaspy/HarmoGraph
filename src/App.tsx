@@ -973,7 +973,7 @@ function App() {
                   void playReference(timelineSec);
                 }
               }}
-              onBpmChange={(value) => {
+              onBpmCommit={(value) => {
                 setBpm(clamp(Number.isFinite(value) ? value : DEFAULT_BPM, 40, 240));
                 if (isReferencePlaying) {
                   const timelineSec = computeReferenceTimelineSec();

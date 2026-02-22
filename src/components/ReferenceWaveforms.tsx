@@ -28,7 +28,7 @@ interface ReferenceWaveformsProps {
   clickOffsetMs: number;
   onClickEnabledChange: (enabled: boolean) => void;
   onClickVolumeChange: (value: number) => void;
-  onBpmChange: (value: number) => void;
+  onBpmCommit: (value: number) => void;
   onBeatsPerBarChange: (value: number) => void;
   onClickOffsetMsChange: (value: number) => void;
 }
@@ -73,6 +73,9 @@ const drawWave = (
   viewStartSec: number,
   viewSpanSec: number,
   cursorSec: number,
+  beatSec: number,
+  clickOffsetSec: number,
+  beatsPerBar: number,
 ): void => {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -89,6 +92,23 @@ const drawWave = (
   ctx.moveTo(0, centerY);
   ctx.lineTo(width, centerY);
   ctx.stroke();
+
+  // Beat guide lines from click timeline for visual alignment.
+  const beatStartIndex = Math.floor((viewStartSec - clickOffsetSec) / beatSec) - 1;
+  const beatEndIndex = Math.ceil((viewStartSec + viewSpanSec - clickOffsetSec) / beatSec) + 1;
+  for (let beatIndex = beatStartIndex; beatIndex <= beatEndIndex; beatIndex += 1) {
+    const beatTimeSec = clickOffsetSec + beatIndex * beatSec;
+    if (beatTimeSec < viewStartSec || beatTimeSec > viewStartSec + viewSpanSec) continue;
+    const x = ((beatTimeSec - viewStartSec) / viewSpanSec) * width;
+    const inBar = ((beatIndex % beatsPerBar) + beatsPerBar) % beatsPerBar;
+    const isBarHead = inBar === 0;
+    ctx.strokeStyle = isBarHead ? '#2563eb' : '#cbd5e1';
+    ctx.lineWidth = isBarHead ? 1.6 : 1;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
 
   if (wave) {
     ctx.strokeStyle = color;
@@ -137,7 +157,7 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
     clickOffsetMs,
     onClickEnabledChange,
     onClickVolumeChange,
-    onBpmChange,
+    onBpmCommit,
     onBeatsPerBarChange,
     onClickOffsetMsChange,
   } = props;
@@ -146,6 +166,8 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
   const [chorusWave, setChorusWave] = useState<TrackWave | null>(null);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValueSec, setSeekValueSec] = useState(0);
+  const [isBpmEditing, setIsBpmEditing] = useState(false);
+  const [bpmDraft, setBpmDraft] = useState('');
 
   const vocalCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const chorusCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -222,6 +244,9 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
         viewport.startSec,
         viewport.spanSec,
         cursorSec,
+        60 / Math.max(1, bpm),
+        clickOffsetMs / 1000,
+        beatsPerBar,
       );
     }
     if (chorusCanvasRef.current) {
@@ -233,9 +258,15 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
         viewport.startSec,
         viewport.spanSec,
         cursorSec,
+        60 / Math.max(1, bpm),
+        clickOffsetMs / 1000,
+        beatsPerBar,
       );
     }
   }, [
+    beatsPerBar,
+    bpm,
+    clickOffsetMs,
     chorusOffsetMs,
     chorusWave,
     cursorSec,
@@ -244,6 +275,14 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
     vocalOffsetMs,
     vocalWave,
   ]);
+
+  const commitBpmDraft = (draft: string): void => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    onBpmCommit(parsed);
+  };
 
   return (
     <section className="card">
@@ -275,12 +314,29 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
         <label>
           BPM
           <input
-            type="number"
-            min={40}
-            max={240}
-            step={0.1}
-            value={bpm}
-            onChange={(event) => onBpmChange(Number(event.target.value))}
+            type="text"
+            inputMode="decimal"
+            value={isBpmEditing ? bpmDraft : String(bpm)}
+            onFocus={() => {
+              setIsBpmEditing(true);
+              setBpmDraft(String(bpm));
+            }}
+            onBlur={() => {
+              const draft = bpmDraft;
+              setIsBpmEditing(false);
+              commitBpmDraft(draft);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                (event.currentTarget as HTMLInputElement).blur();
+              }
+            }}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (/^\d*\.?\d*$/.test(next)) {
+                setBpmDraft(next);
+              }
+            }}
           />
         </label>
         <label>
