@@ -281,6 +281,46 @@ const backfillFromNextVoicedCell = (
   return out;
 };
 
+const guidedReferenceFill = (
+  userFrames: PitchFrame[],
+  refFrames: PitchFrame[],
+  sourceFrames: PitchFrame[],
+  radiusCells = 12,
+  maxRefJumpCents = 480,
+): PitchFrame[] => {
+  const out = userFrames.map((frame) => ({ ...frame }));
+  for (let i = 0; i < out.length; i += 1) {
+    if (out[i].hz !== null) continue;
+    const refHz = refFrames[i]?.hz ?? null;
+    if (refHz === null) continue;
+
+    let hasNeighbor = false;
+    for (let r = 1; r <= radiusCells; r += 1) {
+      const indices = [i - r, i + r];
+      for (const index of indices) {
+        if (index < 0 || index >= sourceFrames.length) continue;
+        const srcHz = sourceFrames[index]?.hz ?? null;
+        if (srcHz === null) continue;
+        const cents = Math.abs(centsError(srcHz, refHz));
+        if (cents <= maxRefJumpCents) {
+          hasNeighbor = true;
+          break;
+        }
+      }
+      if (hasNeighbor) break;
+    }
+
+    if (hasNeighbor) {
+      out[i] = {
+        ...out[i],
+        hz: refHz,
+        clarity: Math.max(0.1, out[i].clarity),
+      };
+    }
+  }
+  return out;
+};
+
 export const analyzePitch = async (
   refBuffer: AudioBuffer,
   userBuffer: AudioBuffer,
@@ -305,10 +345,16 @@ export const analyzePitch = async (
   }));
   const refPitch = quantizePitchToRhythmGrid(refVoiced, rhythm);
   const userGrid = quantizePitchToRhythmGrid(userVoiced, rhythm);
-  const userPitch = backfillFromNextVoicedCell(
-    holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 5, 1), refPitch, 8),
+  const userPitch = guidedReferenceFill(
+    backfillFromNextVoicedCell(
+      holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 5, 1), refPitch, 8),
+      refPitch,
+      0,
+    ),
     refPitch,
-    0,
+    userGrid,
+    12,
+    480,
   );
 
   const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
