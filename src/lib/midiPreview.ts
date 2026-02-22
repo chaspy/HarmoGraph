@@ -16,6 +16,7 @@ export interface NoteExtractionOptions {
   continuityLimitSemitone?: number;
   sameNoteToleranceSemitone?: number;
   maxInNoteRangeSemitone?: number;
+  maxMergeCells?: number;
 }
 
 export interface NoteExtractionDebug {
@@ -43,6 +44,7 @@ const DEFAULT_EXTRACTION_OPTIONS: Required<NoteExtractionOptions> = {
   continuityLimitSemitone: 9,
   sameNoteToleranceSemitone: 1,
   maxInNoteRangeSemitone: 3,
+  maxMergeCells: 2,
 };
 
 const hzToMidi = (hz: number): number => 69 + 12 * Math.log2(hz / 440);
@@ -370,6 +372,7 @@ export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResu
                   continuityLimitSemitone,
                   sameNoteToleranceSemitone,
                   maxInNoteRangeSemitone,
+                  maxMergeCells: DEFAULT_EXTRACTION_OPTIONS.maxMergeCells,
                 };
                 const notes = extractNoteEvents(frames, options);
                 const debug = buildDebugScore(frames, notes);
@@ -397,6 +400,7 @@ export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResu
       continuityLimitSemitone: 12,
       sameNoteToleranceSemitone: 0,
       maxInNoteRangeSemitone: 1,
+      maxMergeCells: DEFAULT_EXTRACTION_OPTIONS.maxMergeCells,
     };
     const aggressiveNotes = extractNoteEvents(frames, aggressive);
     const aggressiveDebug = buildDebugScore(frames, aggressiveNotes);
@@ -450,6 +454,8 @@ export const extractGridAlignedNoteEvents = (frames: PitchFrame[]): AutoExtractR
 
   const notes: NoteEvent[] = [];
   let current: NoteEvent | null = null;
+  let currentCells = 0;
+  const maxMergeCells = DEFAULT_EXTRACTION_OPTIONS.maxMergeCells;
 
   const frameWindow = (index: number): { startSec: number; endSec: number } => {
     const time = frames[index].timeSec;
@@ -479,10 +485,12 @@ export const extractGridAlignedNoteEvents = (frames: PitchFrame[]): AutoExtractR
     if (
       current &&
       current.midi === midi &&
-      Math.abs(current.endSec - window.startSec) <= 0.03
+      Math.abs(current.endSec - window.startSec) <= 0.03 &&
+      currentCells < maxMergeCells
     ) {
       current.endSec = window.endSec;
       current.velocity = Math.max(current.velocity, velocity);
+      currentCells += 1;
       continue;
     }
 
@@ -495,6 +503,7 @@ export const extractGridAlignedNoteEvents = (frames: PitchFrame[]): AutoExtractR
       endSec: window.endSec,
       velocity,
     };
+    currentCells = 1;
   }
 
   if (current) {
