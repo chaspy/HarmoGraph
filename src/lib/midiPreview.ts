@@ -14,6 +14,8 @@ export interface NoteExtractionOptions {
   smoothWindow?: number;
   gapFillSemitone?: number;
   continuityLimitSemitone?: number;
+  sameNoteToleranceSemitone?: number;
+  maxInNoteRangeSemitone?: number;
 }
 
 export interface NoteExtractionDebug {
@@ -77,6 +79,8 @@ export const extractNoteEvents = (
   const smoothWindow = options?.smoothWindow ?? 5;
   const gapFillSemitone = options?.gapFillSemitone ?? 2;
   const continuityLimitSemitone = options?.continuityLimitSemitone ?? 9;
+  const sameNoteToleranceSemitone = options?.sameNoteToleranceSemitone ?? 1;
+  const maxInNoteRangeSemitone = options?.maxInNoteRangeSemitone ?? 3;
 
   if (frames.length === 0) return [];
 
@@ -123,7 +127,8 @@ export const extractNoteEvents = (
   }
 
   const notes: NoteEvent[] = [];
-  let current: { midi: number; startSec: number; clarities: number[] } | null = null;
+  let current: { midi: number; startSec: number; clarities: number[]; minMidi: number; maxMidi: number } | null =
+    null;
 
   for (let i = 0; i < frames.length; i += 1) {
     const midi = quantized[i];
@@ -152,13 +157,22 @@ export const extractNoteEvents = (
         midi,
         startSec: frame.timeSec,
         clarities: [frame.clarity],
+        minMidi: midi,
+        maxMidi: midi,
       };
       continue;
     }
 
-    if (Math.abs(current.midi - midi) <= 1) {
+    const nextMin = Math.min(current.minMidi, midi);
+    const nextMax = Math.max(current.maxMidi, midi);
+    const canContinueByStep = Math.abs(current.midi - midi) <= sameNoteToleranceSemitone;
+    const canContinueByRange = nextMax - nextMin <= maxInNoteRangeSemitone;
+
+    if (canContinueByStep && canContinueByRange) {
       current.clarities.push(frame.clarity);
       current.midi = Math.round((current.midi + midi) / 2);
+      current.minMidi = nextMin;
+      current.maxMidi = nextMax;
       continue;
     }
 
@@ -177,6 +191,8 @@ export const extractNoteEvents = (
       midi,
       startSec: frame.timeSec,
       clarities: [frame.clarity],
+      minMidi: midi,
+      maxMidi: midi,
     };
 
     if (notes.length >= maxNotes) break;
@@ -218,6 +234,7 @@ const buildDebugScore = (frames: PitchFrame[], notes: NoteEvent[]): NoteExtracti
   const frameStepSec = durationSec / Math.max(1, frames.length - 1);
   const voicedSec = voicedFrames * frameStepSec;
   const coverage = voicedSec > 0 ? Math.min(1.2, notesDuration / voicedSec) : 0;
+  const targetNoteCount = Math.min(320, Math.max(24, Math.round(voicedSec / 0.12)));
 
   let maeCentsSum = 0;
   let maeCount = 0;
@@ -244,15 +261,16 @@ const buildDebugScore = (frames: PitchFrame[], notes: NoteEvent[]): NoteExtracti
   const jumpRatio = notes.length > 1 ? jumpCount / (notes.length - 1) : 0;
   const shortCount = notes.filter((note) => note.endSec - note.startSec < 0.05).length;
   const shortRatio = noteCount > 0 ? shortCount / noteCount : 1;
-  const density = noteCount / Math.max(1, durationSec);
-  const densityPenalty = density > 9 ? (density - 9) * 3 : density < 0.8 ? (0.8 - density) * 5 : 0;
+  const noteCountScore = -Math.abs(Math.log((noteCount + 1) / (targetNoteCount + 1))) * 44;
+  const hardLowPenalty = noteCount < targetNoteCount * 0.6 ? (targetNoteCount * 0.6 - noteCount) * 0.75 : 0;
 
   const score =
     coverage * 240 -
     maeCents * 0.9 -
     jumpRatio * 70 -
     shortRatio * 30 -
-    densityPenalty * 10;
+    hardLowPenalty +
+    noteCountScore;
 
   return {
     score,
@@ -265,11 +283,13 @@ const buildDebugScore = (frames: PitchFrame[], notes: NoteEvent[]): NoteExtracti
 };
 
 export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResult => {
-  const minDurationSecSet = [0.02, 0.03, 0.04, 0.06];
+  const minDurationSecSet = [0.015, 0.02, 0.03, 0.04];
   const medianWindowSet = [5, 7, 9];
   const smoothWindowSet = [3, 5, 7];
   const gapFillSemitoneSet = [1, 2, 3];
   const continuityLimitSet = [7, 9, 11];
+  const sameNoteToleranceSet = [0, 1];
+  const maxInNoteRangeSet = [1, 2, 3];
 
   let tried = 0;
   let bestNotes: NoteEvent[] = [];
@@ -280,33 +300,72 @@ export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResu
     smoothWindow: 5,
     gapFillSemitone: 2,
     continuityLimitSemitone: 9,
+    sameNoteToleranceSemitone: 1,
+    maxInNoteRangeSemitone: 3,
   };
   let bestDebug = buildDebugScore(frames, []);
+  const voicedFrames = frames.filter((frame) => frame.hz !== null).length;
+  const durationSec = Math.max(frames.at(-1)?.timeSec ?? 0, 0.001);
+  const frameStepSec = durationSec / Math.max(1, frames.length - 1);
+  const voicedSec = voicedFrames * frameStepSec;
+  const targetNoteCount = Math.min(320, Math.max(24, Math.round(voicedSec / 0.12)));
 
   for (const minDurationSec of minDurationSecSet) {
     for (const medianWindow of medianWindowSet) {
       for (const smoothWindow of smoothWindowSet) {
         for (const gapFillSemitone of gapFillSemitoneSet) {
           for (const continuityLimitSemitone of continuityLimitSet) {
-            const options: Required<NoteExtractionOptions> = {
-              minDurationSec,
-              maxNotes: 2000,
-              medianWindow,
-              smoothWindow,
-              gapFillSemitone,
-              continuityLimitSemitone,
-            };
-            const notes = extractNoteEvents(frames, options);
-            const debug = buildDebugScore(frames, notes);
-            tried += 1;
-            if (debug.score > bestDebug.score) {
-              bestDebug = debug;
-              bestNotes = notes;
-              bestOptions = options;
+            for (const sameNoteToleranceSemitone of sameNoteToleranceSet) {
+              for (const maxInNoteRangeSemitone of maxInNoteRangeSet) {
+                const options: Required<NoteExtractionOptions> = {
+                  minDurationSec,
+                  maxNotes: 2000,
+                  medianWindow,
+                  smoothWindow,
+                  gapFillSemitone,
+                  continuityLimitSemitone,
+                  sameNoteToleranceSemitone,
+                  maxInNoteRangeSemitone,
+                };
+                const notes = extractNoteEvents(frames, options);
+                const debug = buildDebugScore(frames, notes);
+                tried += 1;
+                if (debug.score > bestDebug.score) {
+                  bestDebug = debug;
+                  bestNotes = notes;
+                  bestOptions = options;
+                }
+              }
             }
           }
         }
       }
+    }
+  }
+
+  if (bestDebug.noteCount < targetNoteCount * 0.72) {
+    const aggressive: Required<NoteExtractionOptions> = {
+      minDurationSec: 0.01,
+      maxNotes: 3000,
+      medianWindow: 3,
+      smoothWindow: 3,
+      gapFillSemitone: 1,
+      continuityLimitSemitone: 12,
+      sameNoteToleranceSemitone: 0,
+      maxInNoteRangeSemitone: 1,
+    };
+    const aggressiveNotes = extractNoteEvents(frames, aggressive);
+    const aggressiveDebug = buildDebugScore(frames, aggressiveNotes);
+    tried += 1;
+
+    const chooseAggressive =
+      aggressiveDebug.noteCount > bestDebug.noteCount * 1.2 &&
+      aggressiveDebug.maeCents <= bestDebug.maeCents + 45;
+
+    if (chooseAggressive) {
+      bestNotes = aggressiveNotes;
+      bestOptions = aggressive;
+      bestDebug = aggressiveDebug;
     }
   }
 
