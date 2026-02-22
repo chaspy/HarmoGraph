@@ -17,6 +17,12 @@ export interface AnalysisConfig {
   hopSize: number;
 }
 
+export interface RhythmConfig {
+  bpm: number;
+  clickOffsetMs: number;
+  subdivision: number;
+}
+
 export interface PitchFrame {
   timeSec: number;
   hz: number | null;
@@ -60,6 +66,7 @@ export interface Session {
   analysisReferenceRole?: TrackRole;
   manualOffsetMs: number;
   analysisConfig: AnalysisConfig;
+  rhythmConfig?: RhythmConfig;
   analysisResult: AnalysisResult;
 }
 

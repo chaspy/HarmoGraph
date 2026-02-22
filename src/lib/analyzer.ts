@@ -4,6 +4,7 @@ import type {
   ErrorFrame,
   ErrorSegment,
   PitchFrame,
+  RhythmConfig,
 } from '../types';
 import { mixToMono } from './audioUtils';
 import { extractPitchByModel } from './modelPitch';
@@ -135,11 +136,58 @@ const buildErrorSegments = (
 
 const finiteOrZero = (value: number): number => (Number.isFinite(value) ? value : 0);
 
+const quantizePitchToRhythmGrid = (frames: PitchFrame[], rhythm: RhythmConfig): PitchFrame[] => {
+  if (frames.length === 0) return [];
+  const bpm = Math.max(1, rhythm.bpm);
+  const subdivision = Math.max(1, rhythm.subdivision);
+  const stepSec = (60 / bpm) / subdivision;
+  const offsetSec = rhythm.clickOffsetMs / 1000;
+  const endSec = frames.at(-1)?.timeSec ?? 0;
+  const firstIndex = Math.floor((0 - offsetSec) / stepSec) - 1;
+  const lastIndex = Math.ceil((endSec - offsetSec) / stepSec) + 1;
+
+  const out: PitchFrame[] = [];
+  let frameIndex = 0;
+  for (let gridIndex = firstIndex; gridIndex <= lastIndex; gridIndex += 1) {
+    const cellStart = offsetSec + gridIndex * stepSec;
+    const cellEnd = cellStart + stepSec;
+    const hzValues: number[] = [];
+    const clarityValues: number[] = [];
+
+    while (frameIndex < frames.length && frames[frameIndex].timeSec < cellStart) {
+      frameIndex += 1;
+    }
+    let scanIndex = frameIndex;
+    while (scanIndex < frames.length && frames[scanIndex].timeSec < cellEnd) {
+      const frame = frames[scanIndex];
+      if (frame.hz !== null) {
+        hzValues.push(frame.hz);
+      }
+      clarityValues.push(frame.clarity);
+      scanIndex += 1;
+    }
+
+    const hz = hzValues.length > 0 ? median(hzValues) : null;
+    const clarity =
+      clarityValues.length > 0
+        ? clarityValues.reduce((sum, value) => sum + value, 0) / clarityValues.length
+        : 0;
+    out.push({
+      timeSec: cellStart + stepSec / 2,
+      hz,
+      clarity,
+    });
+  }
+
+  return out.filter((frame) => frame.timeSec >= 0 && frame.timeSec <= endSec + stepSec);
+};
+
 export const analyzePitch = async (
   refBuffer: AudioBuffer,
   userBuffer: AudioBuffer,
   config: AnalysisConfig,
   manualOffsetMs: number,
+  rhythm: RhythmConfig,
 ): Promise<AnalysisResult> => {
   const refMono = mixToMono(refBuffer);
   const userMono = mixToMono(userBuffer);
@@ -148,14 +196,16 @@ export const analyzePitch = async (
     extractPitchByModel(refBuffer),
     extractPitchByModel(userBuffer),
   ]);
-  const refPitch = rawRefPitch.map((frame) => ({
+  const refVoiced = rawRefPitch.map((frame) => ({
     ...frame,
     hz: frame.clarity >= config.clarityThreshold ? frame.hz : null,
   }));
-  const userPitch = rawUserPitch.map((frame) => ({
+  const userVoiced = rawUserPitch.map((frame) => ({
     ...frame,
     hz: frame.clarity >= config.clarityThreshold ? frame.hz : null,
   }));
+  const refPitch = quantizePitchToRhythmGrid(refVoiced, rhythm);
+  const userPitch = quantizePitchToRhythmGrid(userVoiced, rhythm);
 
   const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
   const totalOffsetSec = (estimatedOffsetMs + manualOffsetMs) / 1000;

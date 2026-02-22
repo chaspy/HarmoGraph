@@ -12,7 +12,15 @@ import { Recorder } from './lib/recorder';
 import { deleteProject, loadProjects, saveProject } from './lib/storage';
 import { useObjectUrl } from './lib/useObjectUrl';
 import { clamp, createId, formatSec } from './lib/utils';
-import type { AnalysisConfig, PlaybackState, Project, Session, StoredTrack, TrackRole } from './types';
+import type {
+  AnalysisConfig,
+  PlaybackState,
+  Project,
+  RhythmConfig,
+  Session,
+  StoredTrack,
+  TrackRole,
+} from './types';
 
 const MAX_SONG_SEC = 600;
 const WARN_SONG_SEC = 300;
@@ -620,8 +628,13 @@ function App() {
         decodeBlobToAudioBuffer(analysisTrack.blob),
         decodeBlobToAudioBuffer(recording.blob),
       ]);
+      const rhythmConfig: RhythmConfig = {
+        bpm,
+        clickOffsetMs,
+        subdivision: 4,
+      };
 
-      const analysisResult = await analyzePitch(refBuffer, userBuffer, analysisConfig, 0);
+      const analysisResult = await analyzePitch(refBuffer, userBuffer, analysisConfig, 0, rhythmConfig);
 
       const session: Session = {
         id: createId(),
@@ -632,6 +645,7 @@ function App() {
         analysisReferenceRole: 'vocal',
         manualOffsetMs: 0,
         analysisConfig,
+        rhythmConfig,
         analysisResult,
       };
 
@@ -676,13 +690,19 @@ function App() {
         decodeBlobToAudioBuffer(analysisTrack.blob),
         decodeBlobToAudioBuffer(selectedSession.recording),
       ]);
-      const result = await analyzePitch(refBuffer, userBuffer, analysisConfig, manualOffsetMs);
+      const rhythmConfig: RhythmConfig = {
+        bpm,
+        clickOffsetMs,
+        subdivision: 4,
+      };
+      const result = await analyzePitch(refBuffer, userBuffer, analysisConfig, manualOffsetMs, rhythmConfig);
 
       const updatedSession: Session = {
         ...selectedSession,
         analysisReferenceRole: 'vocal',
         manualOffsetMs,
         analysisConfig,
+        rhythmConfig,
         analysisResult: result,
       };
 
@@ -771,6 +791,9 @@ function App() {
   };
 
   const optimizeNotesForSession = async (session: Session): Promise<AutoExtractResult> => {
+    if (session.analysisResult.userPitch.length > 0) {
+      return autoExtractBestNoteEvents(session.analysisResult.userPitch);
+    }
     const userBuffer = await decodeBlobToAudioBuffer(session.recording);
     const rawPitch = await extractPitchByModel(userBuffer);
     return autoExtractBestNoteEvents(rawPitch);
@@ -797,6 +820,7 @@ function App() {
         analysisReferenceRole: session.analysisReferenceRole ?? 'vocal',
       },
       config: session.analysisConfig,
+      rhythm: session.rhythmConfig ?? null,
       stats: session.analysisResult.stats,
       estimatedOffsetMs: session.analysisResult.estimatedOffsetMs,
       input: {
@@ -1103,8 +1127,8 @@ function App() {
               <section className="card">
                 <h3>解析結果</h3>
                 <p>
-                  解析参照トラック: ボーカル（単旋律ガイド） / 参照検出 {refDetectedCount}/{refTotalCount}{' '}
-                  / 自分検出 {userDetectedCount}/{userTotalCount}
+                  解析参照トラック: ボーカル（単旋律ガイド） / 16分グリッド評価（BPM {selectedSession.rhythmConfig?.bpm ?? bpm}
+                  ） / 参照検出 {refDetectedCount}/{refTotalCount} / 自分検出 {userDetectedCount}/{userTotalCount}
                 </p>
                 <div className="analysis-controls">
                   <label>
