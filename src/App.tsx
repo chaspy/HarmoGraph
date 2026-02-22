@@ -7,6 +7,7 @@ import { extractNoteEvents, playNoteEvents } from './lib/midiPreview';
 import type { NoteEvent } from './lib/midiPreview';
 import { analyzePitch, DEFAULT_ANALYSIS_CONFIG } from './lib/analyzer';
 import { decodeBlobToAudioBuffer } from './lib/audioUtils';
+import { extractPitchByModel } from './lib/modelPitch';
 import { Recorder } from './lib/recorder';
 import { deleteProject, loadProjects, saveProject } from './lib/storage';
 import { useObjectUrl } from './lib/useObjectUrl';
@@ -662,7 +663,10 @@ function App() {
 
   const generateMidiPreview = async (): Promise<void> => {
     if (!selectedSession) return;
-    const notes = extractNoteEvents(selectedSession.analysisResult.userPitch);
+    setStatus('ノート抽出中（生モデル推定）...');
+    const userBuffer = await decodeBlobToAudioBuffer(selectedSession.recording);
+    const rawPitch = await extractPitchByModel(userBuffer);
+    const notes = extractNoteEvents(rawPitch, { minDurationSec: 0.03 });
     setPreviewNotes({ sessionId: selectedSession.id, notes });
     setNoteCursorSec(0);
     await saveDebugSnapshot(selectedSession, notes, 'note_extract');
