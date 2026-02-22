@@ -44,6 +44,11 @@ function App() {
   const userAudioRef = useRef<HTMLAudioElement | null>(null);
   const referenceTimeoutIdsRef = useRef<number[]>([]);
   const referenceRafRef = useRef<number | null>(null);
+  const referencePlayAnchorRef = useRef<{
+    startedAtMs: number;
+    startSec: number;
+    endSec: number;
+  } | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -62,6 +67,15 @@ function App() {
 
   const vocalTrack = getTrack('vocal');
   const chorusTrack = getTrack('chorus');
+  const getReferenceEndSec = useCallback(
+    (vocalOffsetSec: number, chorusOffsetSec: number): number =>
+      Math.max(
+        (vocalTrack?.durationSec ?? 0) + vocalOffsetSec,
+        (chorusTrack?.durationSec ?? 0) + chorusOffsetSec,
+        1,
+      ),
+    [chorusTrack?.durationSec, vocalTrack?.durationSec],
+  );
 
   const selectedSession = useMemo(() => {
     if (!selectedProject) return null;
@@ -253,6 +267,7 @@ function App() {
       window.cancelAnimationFrame(referenceRafRef.current);
       referenceRafRef.current = null;
     }
+    referencePlayAnchorRef.current = null;
     setIsReferencePlaying(false);
     setReferenceCursorSec(0);
     [vocalAudioRef.current, chorusAudioRef.current, userAudioRef.current].forEach((audio) => {
@@ -269,6 +284,7 @@ function App() {
       window.cancelAnimationFrame(referenceRafRef.current);
       referenceRafRef.current = null;
     }
+    referencePlayAnchorRef.current = null;
     setIsReferencePlaying(false);
     setReferenceCursorSec(0);
     const vocal = vocalAudioRef.current;
@@ -331,7 +347,14 @@ function App() {
     if (chorus && !chorus.paused && !Number.isNaN(chorus.currentTime)) {
       points.push(chorus.currentTime + getTrackOffsetMs('chorus') / 1000);
     }
-    if (points.length === 0) return referenceCursorSec;
+    if (points.length === 0) {
+      const anchor = referencePlayAnchorRef.current;
+      if (anchor) {
+        const elapsedSec = (performance.now() - anchor.startedAtMs) / 1000;
+        return Math.min(anchor.endSec, Math.max(0, anchor.startSec + elapsedSec));
+      }
+      return referenceCursorSec;
+    }
     return Math.max(...points, 0);
   }, [getTrackOffsetMs, referenceCursorSec]);
 
@@ -340,6 +363,7 @@ function App() {
     referenceTimeoutIdsRef.current = [];
     const timelineSec = computeReferenceTimelineSec();
     setReferenceCursorSec(Math.max(0, timelineSec));
+    referencePlayAnchorRef.current = null;
     setIsReferencePlaying(false);
     [vocalAudioRef.current, chorusAudioRef.current].forEach((audio) => {
       if (!audio) return;
@@ -355,7 +379,7 @@ function App() {
     const startSec = Math.max(0, fromSec ?? referenceCursorSec);
     const vocalOffsetSec = getTrackOffsetMs('vocal') / 1000;
     const chorusOffsetSec = getTrackOffsetMs('chorus') / 1000;
-    const baseSec = Math.min(vocalOffsetSec, chorusOffsetSec, startSec);
+    const endSec = getReferenceEndSec(vocalOffsetSec, chorusOffsetSec);
 
     referenceTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
     referenceTimeoutIdsRef.current = [];
@@ -378,7 +402,12 @@ function App() {
 
     playTrack(vocalAudioRef.current, Boolean(vocalUrl), vocalOffsetSec);
     playTrack(chorusAudioRef.current, Boolean(chorusUrl), chorusOffsetSec);
-    setReferenceCursorSec(Math.max(0, baseSec));
+    referencePlayAnchorRef.current = {
+      startedAtMs: performance.now(),
+      startSec,
+      endSec,
+    };
+    setReferenceCursorSec(Math.max(0, startSec));
     setIsReferencePlaying(true);
   };
 
@@ -399,8 +428,10 @@ function App() {
       const chorus = chorusAudioRef.current;
       const vocalActive = Boolean(vocal && !vocal.paused);
       const chorusActive = Boolean(chorus && !chorus.paused);
+      const anchor = referencePlayAnchorRef.current;
 
-      if (!vocalActive && !chorusActive) {
+      if (!vocalActive && !chorusActive && anchor && timeline >= anchor.endSec - 0.01) {
+        referencePlayAnchorRef.current = null;
         setIsReferencePlaying(false);
         return;
       }
