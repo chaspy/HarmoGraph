@@ -3,8 +3,8 @@ import './App.css';
 import { PianoRoll } from './components/PianoRoll';
 import { PitchCanvas } from './components/PitchCanvas';
 import { ReferenceWaveforms } from './components/ReferenceWaveforms';
-import { extractNoteEvents, playNoteEvents } from './lib/midiPreview';
-import type { NoteEvent } from './lib/midiPreview';
+import { autoExtractBestNoteEvents, playNoteEvents } from './lib/midiPreview';
+import type { AutoExtractResult, NoteEvent } from './lib/midiPreview';
 import { analyzePitch, DEFAULT_ANALYSIS_CONFIG } from './lib/analyzer';
 import { decodeBlobToAudioBuffer } from './lib/audioUtils';
 import { extractPitchByModel } from './lib/modelPitch';
@@ -41,6 +41,9 @@ function App() {
   const [manualOffsetMs, setManualOffsetMs] = useState(0);
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig>(DEFAULT_ANALYSIS_CONFIG);
   const [previewNotes, setPreviewNotes] = useState<{ sessionId: string; notes: NoteEvent[] } | null>(
+    null,
+  );
+  const [previewMeta, setPreviewMeta] = useState<{ sessionId: string; result: AutoExtractResult } | null>(
     null,
   );
   const [noteCursorSec, setNoteCursorSec] = useState(0);
@@ -103,6 +106,8 @@ function App() {
   const currentPreviewNotes =
     selectedSession && previewNotes?.sessionId === selectedSession.id ? previewNotes.notes : [];
   const previewDurationSec = currentPreviewNotes.reduce((max, note) => Math.max(max, note.endSec), 1);
+  const currentPreviewMeta =
+    selectedSession && previewMeta?.sessionId === selectedSession.id ? previewMeta.result : null;
 
   useEffect(() => {
     void (async () => {
@@ -579,10 +584,14 @@ function App() {
 
       await persistProject(nextProject);
       setActiveSessionId(session.id);
-      const notes = extractNoteEvents(session.analysisResult.userPitch);
-      setPreviewNotes({ sessionId: session.id, notes });
-      await saveDebugSnapshot(session, notes, 'analyze');
-      setStatus('解析が完了しました。グラフと統計を確認してください。');
+      setStatus('解析完了。ノート抽出を自動最適化中...');
+      const optimizeResult = await optimizeNotesForSession(session);
+      setPreviewNotes({ sessionId: session.id, notes: optimizeResult.notes });
+      setPreviewMeta({ sessionId: session.id, result: optimizeResult });
+      await saveDebugSnapshot(session, optimizeResult, 'analyze');
+      setStatus(
+        `解析完了。ノート最適化: ${optimizeResult.notes.length} ノート（${optimizeResult.tried}試行）`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : '録音停止に失敗しました';
       setStatus(`停止/解析エラー: ${message}`);
@@ -626,10 +635,14 @@ function App() {
         ),
       };
       await persistProject(nextProject);
-      const notes = extractNoteEvents(updatedSession.analysisResult.userPitch);
-      setPreviewNotes({ sessionId: updatedSession.id, notes });
-      await saveDebugSnapshot(updatedSession, notes, 'reanalyze');
-      setStatus('再解析が完了しました。');
+      setStatus('再解析完了。ノート抽出を自動最適化中...');
+      const optimizeResult = await optimizeNotesForSession(updatedSession);
+      setPreviewNotes({ sessionId: updatedSession.id, notes: optimizeResult.notes });
+      setPreviewMeta({ sessionId: updatedSession.id, result: optimizeResult });
+      await saveDebugSnapshot(updatedSession, optimizeResult, 'reanalyze');
+      setStatus(
+        `再解析完了。ノート最適化: ${optimizeResult.notes.length} ノート（${optimizeResult.tried}試行）`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : '再解析に失敗しました';
       setStatus(`再解析エラー: ${message}`);
@@ -663,14 +676,15 @@ function App() {
 
   const generateMidiPreview = async (): Promise<void> => {
     if (!selectedSession) return;
-    setStatus('ノート抽出中（生モデル推定）...');
-    const userBuffer = await decodeBlobToAudioBuffer(selectedSession.recording);
-    const rawPitch = await extractPitchByModel(userBuffer);
-    const notes = extractNoteEvents(rawPitch, { minDurationSec: 0.03 });
-    setPreviewNotes({ sessionId: selectedSession.id, notes });
+    setStatus('ノート抽出を自動最適化中...');
+    const optimizeResult = await optimizeNotesForSession(selectedSession);
+    setPreviewNotes({ sessionId: selectedSession.id, notes: optimizeResult.notes });
+    setPreviewMeta({ sessionId: selectedSession.id, result: optimizeResult });
     setNoteCursorSec(0);
-    await saveDebugSnapshot(selectedSession, notes, 'note_extract');
-    setStatus(`ノート抽出: ${notes.length} ノートを生成し、debugに自動保存しました。`);
+    await saveDebugSnapshot(selectedSession, optimizeResult, 'note_extract');
+    setStatus(
+      `ノート抽出: ${optimizeResult.notes.length} ノート（${optimizeResult.tried}試行）を生成し、debugに自動保存しました。`,
+    );
   };
 
   const playMidiPreview = (): void => {
@@ -698,9 +712,15 @@ function App() {
     setIsNotePlaying(false);
   };
 
+  const optimizeNotesForSession = async (session: Session): Promise<AutoExtractResult> => {
+    const userBuffer = await decodeBlobToAudioBuffer(session.recording);
+    const rawPitch = await extractPitchByModel(userBuffer);
+    return autoExtractBestNoteEvents(rawPitch);
+  };
+
   const saveDebugSnapshot = async (
     session: Session,
-    notes: NoteEvent[],
+    extractResult: AutoExtractResult,
     reason: 'analyze' | 'reanalyze' | 'note_extract',
   ): Promise<void> => {
     if (!selectedProject) return;
@@ -727,7 +747,12 @@ function App() {
         errorFrames: session.analysisResult.errorFrames,
       },
       output: {
-        notes,
+        notes: extractResult.notes,
+        optimization: {
+          options: extractResult.options,
+          debug: extractResult.debug,
+          tried: extractResult.tried,
+        },
       },
     };
 
@@ -1091,6 +1116,18 @@ function App() {
                       ノート数: {currentPreviewNotes.length} / 再生位置: {formatSec(noteCursorSec)}
                     </strong>
                   </div>
+                  {currentPreviewMeta && (
+                    <div className="caption">
+                      自動最適化: {currentPreviewMeta.tried}試行 / MAE{' '}
+                      {currentPreviewMeta.debug.maeCents.toFixed(1)} cents / カバレッジ{' '}
+                      {(currentPreviewMeta.debug.coverage * 100).toFixed(1)}% / パラメータ(
+                      minDur={currentPreviewMeta.options.minDurationSec.toFixed(2)}s, median=
+                      {currentPreviewMeta.options.medianWindow}, smooth=
+                      {currentPreviewMeta.options.smoothWindow}, gap=
+                      {currentPreviewMeta.options.gapFillSemitone}, cont=
+                      {currentPreviewMeta.options.continuityLimitSemitone})
+                    </div>
+                  )}
                   <PianoRoll
                     notes={currentPreviewNotes}
                     durationSec={previewDurationSec}

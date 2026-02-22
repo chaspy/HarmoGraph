@@ -7,6 +7,31 @@ export interface NoteEvent {
   velocity: number;
 }
 
+export interface NoteExtractionOptions {
+  minDurationSec?: number;
+  maxNotes?: number;
+  medianWindow?: number;
+  smoothWindow?: number;
+  gapFillSemitone?: number;
+  continuityLimitSemitone?: number;
+}
+
+export interface NoteExtractionDebug {
+  score: number;
+  coverage: number;
+  maeCents: number;
+  noteCount: number;
+  jumpRatio: number;
+  shortRatio: number;
+}
+
+export interface AutoExtractResult {
+  notes: NoteEvent[];
+  options: Required<NoteExtractionOptions>;
+  debug: NoteExtractionDebug;
+  tried: number;
+}
+
 const hzToMidi = (hz: number): number => 69 + 12 * Math.log2(hz / 440);
 
 const smoothFloat = (values: Array<number | null>, windowSize: number): Array<number | null> => {
@@ -44,16 +69,20 @@ const medianFilter = (values: Array<number | null>, windowSize: number): Array<n
 
 export const extractNoteEvents = (
   frames: PitchFrame[],
-  options?: { minDurationSec?: number; maxNotes?: number },
+  options?: NoteExtractionOptions,
 ): NoteEvent[] => {
   const minDurationSec = options?.minDurationSec ?? 0.04;
   const maxNotes = options?.maxNotes ?? 2000;
+  const medianWindow = options?.medianWindow ?? 7;
+  const smoothWindow = options?.smoothWindow ?? 5;
+  const gapFillSemitone = options?.gapFillSemitone ?? 2;
+  const continuityLimitSemitone = options?.continuityLimitSemitone ?? 9;
 
   if (frames.length === 0) return [];
 
   const midiTrack = smoothFloat(
-    medianFilter(frames.map((frame) => (frame.hz === null ? null : hzToMidi(frame.hz))), 7),
-    5,
+    medianFilter(frames.map((frame) => (frame.hz === null ? null : hzToMidi(frame.hz))), medianWindow),
+    smoothWindow,
   );
 
   const quantized = midiTrack.map((midi) => (midi === null ? null : Math.round(midi)));
@@ -63,7 +92,7 @@ export const extractNoteEvents = (
     if (quantized[i] !== null) continue;
     const prev = quantized[i - 1];
     const next = quantized[i + 1];
-    if (prev !== null && next !== null && Math.abs(prev - next) <= 2) {
+    if (prev !== null && next !== null && Math.abs(prev - next) <= gapFillSemitone) {
       quantized[i] = Math.round((prev + next) / 2);
     }
   }
@@ -87,7 +116,7 @@ export const extractNoteEvents = (
         best = candidate;
       }
     }
-    quantized[i] = bestAbs <= 9 ? best : null;
+    quantized[i] = bestAbs <= continuityLimitSemitone ? best : null;
     if (quantized[i] !== null) {
       anchor = Math.round(anchor * 0.75 + (quantized[i] as number) * 0.25);
     }
@@ -169,6 +198,124 @@ export const extractNoteEvents = (
   }
 
   return notes;
+};
+
+const buildDebugScore = (frames: PitchFrame[], notes: NoteEvent[]): NoteExtractionDebug => {
+  if (frames.length === 0) {
+    return {
+      score: Number.NEGATIVE_INFINITY,
+      coverage: 0,
+      maeCents: 9999,
+      noteCount: 0,
+      jumpRatio: 1,
+      shortRatio: 1,
+    };
+  }
+  const voicedFrames = frames.filter((frame) => frame.hz !== null).length;
+  const durationSec = Math.max(frames.at(-1)?.timeSec ?? 0, 0.001);
+  const noteCount = notes.length;
+  const notesDuration = notes.reduce((sum, note) => sum + Math.max(0, note.endSec - note.startSec), 0);
+  const frameStepSec = durationSec / Math.max(1, frames.length - 1);
+  const voicedSec = voicedFrames * frameStepSec;
+  const coverage = voicedSec > 0 ? Math.min(1.2, notesDuration / voicedSec) : 0;
+
+  let maeCentsSum = 0;
+  let maeCount = 0;
+  let noteIndex = 0;
+  for (const frame of frames) {
+    if (frame.hz === null) continue;
+    while (noteIndex < notes.length && notes[noteIndex].endSec < frame.timeSec) {
+      noteIndex += 1;
+    }
+    const note = notes[noteIndex];
+    if (!note || frame.timeSec < note.startSec || frame.timeSec > note.endSec) continue;
+    const noteHz = 440 * 2 ** ((note.midi - 69) / 12);
+    const cents = Math.abs(1200 * Math.log2(frame.hz / noteHz));
+    maeCentsSum += cents;
+    maeCount += 1;
+  }
+  const maeCents = maeCount > 0 ? maeCentsSum / maeCount : 9999;
+
+  let jumpCount = 0;
+  for (let i = 1; i < notes.length; i += 1) {
+    const diff = Math.abs(notes[i].midi - notes[i - 1].midi);
+    if (diff >= 8) jumpCount += 1;
+  }
+  const jumpRatio = notes.length > 1 ? jumpCount / (notes.length - 1) : 0;
+  const shortCount = notes.filter((note) => note.endSec - note.startSec < 0.05).length;
+  const shortRatio = noteCount > 0 ? shortCount / noteCount : 1;
+  const density = noteCount / Math.max(1, durationSec);
+  const densityPenalty = density > 9 ? (density - 9) * 3 : density < 0.8 ? (0.8 - density) * 5 : 0;
+
+  const score =
+    coverage * 240 -
+    maeCents * 0.9 -
+    jumpRatio * 70 -
+    shortRatio * 30 -
+    densityPenalty * 10;
+
+  return {
+    score,
+    coverage,
+    maeCents,
+    noteCount,
+    jumpRatio,
+    shortRatio,
+  };
+};
+
+export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResult => {
+  const minDurationSecSet = [0.02, 0.03, 0.04, 0.06];
+  const medianWindowSet = [5, 7, 9];
+  const smoothWindowSet = [3, 5, 7];
+  const gapFillSemitoneSet = [1, 2, 3];
+  const continuityLimitSet = [7, 9, 11];
+
+  let tried = 0;
+  let bestNotes: NoteEvent[] = [];
+  let bestOptions: Required<NoteExtractionOptions> = {
+    minDurationSec: 0.04,
+    maxNotes: 2000,
+    medianWindow: 7,
+    smoothWindow: 5,
+    gapFillSemitone: 2,
+    continuityLimitSemitone: 9,
+  };
+  let bestDebug = buildDebugScore(frames, []);
+
+  for (const minDurationSec of minDurationSecSet) {
+    for (const medianWindow of medianWindowSet) {
+      for (const smoothWindow of smoothWindowSet) {
+        for (const gapFillSemitone of gapFillSemitoneSet) {
+          for (const continuityLimitSemitone of continuityLimitSet) {
+            const options: Required<NoteExtractionOptions> = {
+              minDurationSec,
+              maxNotes: 2000,
+              medianWindow,
+              smoothWindow,
+              gapFillSemitone,
+              continuityLimitSemitone,
+            };
+            const notes = extractNoteEvents(frames, options);
+            const debug = buildDebugScore(frames, notes);
+            tried += 1;
+            if (debug.score > bestDebug.score) {
+              bestDebug = debug;
+              bestNotes = notes;
+              bestOptions = options;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    notes: bestNotes,
+    options: bestOptions,
+    debug: bestDebug,
+    tried,
+  };
 };
 
 export interface PlaybackHandle {
