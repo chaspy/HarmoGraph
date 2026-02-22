@@ -304,11 +304,11 @@ function App() {
     }
   };
 
-  const seekReference = async (timelineSec: number): Promise<void> => {
+  const seekReference = (timelineSec: number): void => {
     const sec = Math.max(0, timelineSec);
     setReferenceCursorSec(sec);
     if (isReferencePlaying) {
-      await playReference(sec);
+      void playReference(sec);
       return;
     }
     const vocal = vocalAudioRef.current;
@@ -683,7 +683,7 @@ function App() {
               onPlay={() => void playReference()}
               onPause={pauseReference}
               onReset={resetReferencePlayback}
-              onSeek={(sec) => void seekReference(sec)}
+              onSeek={seekReference}
               onVocalOffsetChange={(offset) => void changeReferenceOffset('vocal', offset)}
               onChorusOffsetChange={(offset) => void changeReferenceOffset('chorus', offset)}
             />

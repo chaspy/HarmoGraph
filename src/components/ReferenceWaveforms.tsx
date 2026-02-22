@@ -124,6 +124,8 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
 
   const [vocalWave, setVocalWave] = useState<TrackWave | null>(null);
   const [chorusWave, setChorusWave] = useState<TrackWave | null>(null);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekValueSec, setSeekValueSec] = useState(0);
 
   const vocalCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const chorusCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -163,18 +165,32 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
   const viewport = useMemo(() => {
     const vocalOffsetSec = vocalOffsetMs / 1000;
     const chorusOffsetSec = chorusOffsetMs / 1000;
-    const start = Math.min(vocalOffsetSec, chorusOffsetSec, 0);
-    const end = Math.max(
+    const rawStart = Math.min(vocalOffsetSec, chorusOffsetSec, 0);
+    const rawEnd = Math.max(
       (vocalWave?.durationSec ?? 0) + vocalOffsetSec,
       (chorusWave?.durationSec ?? 0) + chorusOffsetSec,
       1,
     );
+    const rawSpan = Math.max(1, rawEnd - rawStart);
+    const windowSpan = Math.min(20, rawSpan);
+    const center = isSeeking ? seekValueSec : cursorSec;
+    const start = Math.max(rawStart, Math.min(rawEnd - windowSpan, center - windowSpan / 2));
+    const end = start + windowSpan;
     return {
       startSec: start,
       endSec: end,
-      spanSec: Math.max(1, end - start),
+      spanSec: windowSpan,
+      totalEndSec: rawEnd,
     };
-  }, [chorusOffsetMs, chorusWave?.durationSec, vocalOffsetMs, vocalWave?.durationSec]);
+  }, [
+    chorusOffsetMs,
+    chorusWave?.durationSec,
+    cursorSec,
+    isSeeking,
+    seekValueSec,
+    vocalOffsetMs,
+    vocalWave?.durationSec,
+  ]);
 
   useEffect(() => {
     if (vocalCanvasRef.current) {
@@ -232,10 +248,21 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
         <input
           type="range"
           min={0}
-          max={Math.max(1, viewport.endSec)}
+          max={Math.max(1, viewport.totalEndSec)}
           step={0.01}
-          value={cursorSec}
-          onChange={(event) => onSeek(Number(event.target.value))}
+          value={isSeeking ? seekValueSec : cursorSec}
+          onPointerDown={() => {
+            setSeekValueSec(cursorSec);
+            setIsSeeking(true);
+          }}
+          onPointerUp={() => setIsSeeking(false)}
+          onPointerCancel={() => setIsSeeking(false)}
+          onInput={(event) => {
+            const sec = Number((event.target as HTMLInputElement).value);
+            setSeekValueSec(sec);
+            onSeek(sec);
+          }}
+          onChange={() => {}}
         />
       </label>
 
