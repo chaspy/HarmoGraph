@@ -267,3 +267,19 @@ button.danger {
     grid-template-columns: 1fr;
   }
 }
+
+.status-toast {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  max-width: min(860px, calc(100vw - 24px));
+  width: max-content;
+  padding: 10px 14px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: var(--ink);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.18);
+}

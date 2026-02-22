@@ -744,12 +744,13 @@ function App() {
   const userTotalCount = selectedSession ? selectedSession.analysisResult.userPitch.length : 0;
 
   return (
-    <div className="app-shell">
+    <>
       {toastVisible && (
         <div aria-live="polite" className="status-toast" role="status">
           {status}
         </div>
       )}
+      <div className="app-shell">
       <aside className="sidebar">
         <h1>HarmoGraph</h1>
         <p className="caption">ローカル専用 / オフライン動作 / マイク権限が必要</p>
@@ -1101,7 +1102,8 @@ function App() {
           </>
         )}
       </main>
-    </div>
+      </div>
+    </>
   );
 }
 
