@@ -257,6 +257,30 @@ const holdVoicingOnReferenceCells = (
   return out;
 };
 
+const backfillFromNextVoicedCell = (
+  userFrames: PitchFrame[],
+  refFrames: PitchFrame[],
+  maxLookaheadCells = 1,
+): PitchFrame[] => {
+  const out = userFrames.map((frame) => ({ ...frame }));
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (out[i].hz !== null) continue;
+    if (!refFrames[i] || refFrames[i].hz === null) continue;
+
+    for (let k = i + 1; k < out.length && k <= i + maxLookaheadCells; k += 1) {
+      if (!refFrames[k] || refFrames[k].hz === null) break;
+      if (out[k].hz === null) continue;
+      out[i] = {
+        ...out[i],
+        hz: out[k].hz,
+        clarity: Math.max(0.1, out[k].clarity * 0.7),
+      };
+      break;
+    }
+  }
+  return out;
+};
+
 export const analyzePitch = async (
   refBuffer: AudioBuffer,
   userBuffer: AudioBuffer,
@@ -281,7 +305,11 @@ export const analyzePitch = async (
   }));
   const refPitch = quantizePitchToRhythmGrid(refVoiced, rhythm);
   const userGrid = quantizePitchToRhythmGrid(userVoiced, rhythm);
-  const userPitch = holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 2, 2), refPitch, 1);
+  const userPitch = backfillFromNextVoicedCell(
+    holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 1, 1), refPitch, 4),
+    refPitch,
+    1,
+  );
 
   const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
   const totalOffsetSec = (estimatedOffsetMs + manualOffsetMs) / 1000;
