@@ -3,7 +3,7 @@ import './App.css';
 import { PianoRoll } from './components/PianoRoll';
 import { PitchCanvas } from './components/PitchCanvas';
 import { ReferenceWaveforms } from './components/ReferenceWaveforms';
-import { autoExtractBestNoteEvents, playNoteEvents } from './lib/midiPreview';
+import { autoExtractBestNoteEvents, extractGridAlignedNoteEvents, playNoteEvents } from './lib/midiPreview';
 import type { AutoExtractResult, NoteEvent } from './lib/midiPreview';
 import { analyzePitch, DEFAULT_ANALYSIS_CONFIG } from './lib/analyzer';
 import { decodeBlobToAudioBuffer } from './lib/audioUtils';
@@ -791,6 +791,9 @@ function App() {
   };
 
   const optimizeNotesForSession = async (session: Session): Promise<AutoExtractResult> => {
+    if (session.rhythmConfig && session.analysisResult.userPitch.length > 0) {
+      return extractGridAlignedNoteEvents(session.analysisResult.userPitch);
+    }
     if (session.analysisResult.userPitch.length > 0) {
       return autoExtractBestNoteEvents(session.analysisResult.userPitch);
     }

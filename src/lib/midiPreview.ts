@@ -34,6 +34,17 @@ export interface AutoExtractResult {
   tried: number;
 }
 
+const DEFAULT_EXTRACTION_OPTIONS: Required<NoteExtractionOptions> = {
+  minDurationSec: 0.04,
+  maxNotes: 2000,
+  medianWindow: 7,
+  smoothWindow: 5,
+  gapFillSemitone: 2,
+  continuityLimitSemitone: 9,
+  sameNoteToleranceSemitone: 1,
+  maxInNoteRangeSemitone: 3,
+};
+
 const hzToMidi = (hz: number): number => 69 + 12 * Math.log2(hz / 440);
 
 const smoothFloat = (values: Array<number | null>, windowSize: number): Array<number | null> => {
@@ -335,16 +346,7 @@ export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResu
 
   let tried = 0;
   let bestNotes: NoteEvent[] = [];
-  let bestOptions: Required<NoteExtractionOptions> = {
-    minDurationSec: 0.04,
-    maxNotes: 2000,
-    medianWindow: 7,
-    smoothWindow: 5,
-    gapFillSemitone: 2,
-    continuityLimitSemitone: 9,
-    sameNoteToleranceSemitone: 1,
-    maxInNoteRangeSemitone: 3,
-  };
+  let bestOptions: Required<NoteExtractionOptions> = { ...DEFAULT_EXTRACTION_OPTIONS };
   let bestDebug = buildDebugScore(frames, []);
   const voicedFrames = frames.filter((frame) => frame.hz !== null).length;
   const durationSec = Math.max(frames.at(-1)?.timeSec ?? 0, 0.001);
@@ -426,6 +428,85 @@ export const autoExtractBestNoteEvents = (frames: PitchFrame[]): AutoExtractResu
     options: bestOptions,
     debug: bestDebug,
     tried,
+  };
+};
+
+export const extractGridAlignedNoteEvents = (frames: PitchFrame[]): AutoExtractResult => {
+  if (frames.length === 0) {
+    return {
+      notes: [],
+      options: { ...DEFAULT_EXTRACTION_OPTIONS },
+      debug: {
+        score: 0,
+        coverage: 0,
+        maeCents: 0,
+        noteCount: 0,
+        jumpRatio: 0,
+        shortRatio: 0,
+      },
+      tried: 1,
+    };
+  }
+
+  const notes: NoteEvent[] = [];
+  let current: NoteEvent | null = null;
+
+  const frameWindow = (index: number): { startSec: number; endSec: number } => {
+    const time = frames[index].timeSec;
+    const prevTime = index > 0 ? frames[index - 1].timeSec : time;
+    const nextTime = index + 1 < frames.length ? frames[index + 1].timeSec : time;
+    const start = index > 0 ? (prevTime + time) / 2 : Math.max(0, time - (nextTime - time) / 2);
+    const end = index + 1 < frames.length ? (time + nextTime) / 2 : time + (time - prevTime) / 2;
+    return {
+      startSec: Math.max(0, start),
+      endSec: Math.max(Math.max(0, start), end),
+    };
+  };
+
+  for (let i = 0; i < frames.length; i += 1) {
+    const frame = frames[i];
+    const window = frameWindow(i);
+    if (frame.hz === null) {
+      if (current) {
+        notes.push(current);
+        current = null;
+      }
+      continue;
+    }
+
+    const midi = Math.round(hzToMidi(frame.hz));
+    const velocity = Math.max(30, Math.min(120, Math.round(frame.clarity * 100)));
+    if (
+      current &&
+      current.midi === midi &&
+      Math.abs(current.endSec - window.startSec) <= 0.03
+    ) {
+      current.endSec = window.endSec;
+      current.velocity = Math.max(current.velocity, velocity);
+      continue;
+    }
+
+    if (current) {
+      notes.push(current);
+    }
+    current = {
+      midi,
+      startSec: window.startSec,
+      endSec: window.endSec,
+      velocity,
+    };
+  }
+
+  if (current) {
+    notes.push(current);
+  }
+
+  const debug = buildDebugScore(frames, notes);
+  return {
+    notes,
+    options: { ...DEFAULT_EXTRACTION_OPTIONS },
+    debug,
+    tried: 1,
   };
 };
 
