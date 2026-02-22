@@ -277,6 +277,9 @@ export function ReferenceWaveforms(props: ReferenceWaveformsProps): ReactElement
   ]);
 
   const commitBpmDraft = (draft: string): void => {
+    if (draft.trim() === '') {
+      return;
+    }
     const parsed = Number(draft);
     if (!Number.isFinite(parsed)) {
       return;

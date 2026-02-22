@@ -16,6 +16,7 @@ import type {
   AnalysisConfig,
   PlaybackState,
   Project,
+  ReferenceAlignConfig,
   RhythmConfig,
   Session,
   StoredTrack,
@@ -25,6 +26,13 @@ import type {
 const MAX_SONG_SEC = 600;
 const WARN_SONG_SEC = 300;
 const DEFAULT_BPM = 120;
+const DEFAULT_REFERENCE_ALIGN_CONFIG: ReferenceAlignConfig = {
+  clickEnabled: true,
+  clickVolume: 0.35,
+  bpm: DEFAULT_BPM,
+  beatsPerBar: 4,
+  clickOffsetMs: 0,
+};
 
 const defaultPlayback: PlaybackState = {
   vocalEnabled: true,
@@ -46,11 +54,11 @@ function App() {
   const [referenceRecordingRole, setReferenceRecordingRole] = useState<TrackRole | null>(null);
   const [referenceCursorSec, setReferenceCursorSec] = useState(0);
   const [isReferencePlaying, setIsReferencePlaying] = useState(false);
-  const [clickEnabled, setClickEnabled] = useState(true);
-  const [clickVolume, setClickVolume] = useState(0.35);
-  const [bpm, setBpm] = useState(DEFAULT_BPM);
-  const [beatsPerBar, setBeatsPerBar] = useState(4);
-  const [clickOffsetMs, setClickOffsetMs] = useState(0);
+  const [clickEnabled, setClickEnabled] = useState(DEFAULT_REFERENCE_ALIGN_CONFIG.clickEnabled);
+  const [clickVolume, setClickVolume] = useState(DEFAULT_REFERENCE_ALIGN_CONFIG.clickVolume);
+  const [bpm, setBpm] = useState(DEFAULT_REFERENCE_ALIGN_CONFIG.bpm);
+  const [beatsPerBar, setBeatsPerBar] = useState(DEFAULT_REFERENCE_ALIGN_CONFIG.beatsPerBar);
+  const [clickOffsetMs, setClickOffsetMs] = useState(DEFAULT_REFERENCE_ALIGN_CONFIG.clickOffsetMs);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [manualOffsetMs, setManualOffsetMs] = useState(0);
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisConfig>(DEFAULT_ANALYSIS_CONFIG);
@@ -176,6 +184,15 @@ function App() {
   }, [selectedSession]);
 
   useEffect(() => {
+    const config = selectedProject?.referenceAlignConfig ?? DEFAULT_REFERENCE_ALIGN_CONFIG;
+    setClickEnabled(config.clickEnabled);
+    setClickVolume(config.clickVolume);
+    setBpm(config.bpm);
+    setBeatsPerBar(config.beatsPerBar);
+    setClickOffsetMs(config.clickOffsetMs);
+  }, [selectedProject]);
+
+  useEffect(() => {
     const vocal = vocalAudioRef.current;
     const chorus = chorusAudioRef.current;
     if (vocal) {
@@ -199,6 +216,21 @@ function App() {
     });
   };
 
+  const persistReferenceAlignConfig = async (
+    patch: Partial<ReferenceAlignConfig>,
+  ): Promise<void> => {
+    if (!selectedProject) return;
+    const current = selectedProject.referenceAlignConfig ?? DEFAULT_REFERENCE_ALIGN_CONFIG;
+    const nextProject: Project = {
+      ...selectedProject,
+      referenceAlignConfig: {
+        ...current,
+        ...patch,
+      },
+    };
+    await persistProject(nextProject);
+  };
+
   const createProject = async (): Promise<void> => {
     const name = newProjectName.trim();
     if (!name) {
@@ -213,6 +245,7 @@ function App() {
       updatedAt: now,
       tracks: [],
       sessions: [],
+      referenceAlignConfig: DEFAULT_REFERENCE_ALIGN_CONFIG,
     };
     await saveProject(project);
     setProjects((current) => [project, ...current]);
@@ -988,34 +1021,43 @@ function App() {
               clickOffsetMs={clickOffsetMs}
               onClickEnabledChange={(enabled) => {
                 setClickEnabled(enabled);
+                void persistReferenceAlignConfig({ clickEnabled: enabled });
                 if (isReferencePlaying) {
                   const timelineSec = computeReferenceTimelineSec();
                   void playReference(timelineSec);
                 }
               }}
               onClickVolumeChange={(value) => {
-                setClickVolume(clamp(value, 0, 1));
+                const next = clamp(value, 0, 1);
+                setClickVolume(next);
+                void persistReferenceAlignConfig({ clickVolume: next });
                 if (isReferencePlaying) {
                   const timelineSec = computeReferenceTimelineSec();
                   void playReference(timelineSec);
                 }
               }}
               onBpmCommit={(value) => {
-                setBpm(clamp(Number.isFinite(value) ? value : DEFAULT_BPM, 40, 240));
+                const next = clamp(Number.isFinite(value) ? value : DEFAULT_BPM, 40, 240);
+                setBpm(next);
+                void persistReferenceAlignConfig({ bpm: next });
                 if (isReferencePlaying) {
                   const timelineSec = computeReferenceTimelineSec();
                   void playReference(timelineSec);
                 }
               }}
               onBeatsPerBarChange={(value) => {
-                setBeatsPerBar(value === 3 ? 3 : 4);
+                const next = value === 3 ? 3 : 4;
+                setBeatsPerBar(next);
+                void persistReferenceAlignConfig({ beatsPerBar: next });
                 if (isReferencePlaying) {
                   const timelineSec = computeReferenceTimelineSec();
                   void playReference(timelineSec);
                 }
               }}
               onClickOffsetMsChange={(value) => {
-                setClickOffsetMs(clamp(Math.round(value), -500, 500));
+                const next = clamp(Math.round(value), -500, 500);
+                setClickOffsetMs(next);
+                void persistReferenceAlignConfig({ clickOffsetMs: next });
                 if (isReferencePlaying) {
                   const timelineSec = computeReferenceTimelineSec();
                   void playReference(timelineSec);

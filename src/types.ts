@@ -23,6 +23,14 @@ export interface RhythmConfig {
   subdivision: number;
 }
 
+export interface ReferenceAlignConfig {
+  clickEnabled: boolean;
+  clickVolume: number;
+  bpm: number;
+  beatsPerBar: number;
+  clickOffsetMs: number;
+}
+
 export interface PitchFrame {
   timeSec: number;
   hz: number | null;
@@ -77,6 +85,7 @@ export interface Project {
   updatedAt: string;
   tracks: StoredTrack[];
   sessions: Session[];
+  referenceAlignConfig?: ReferenceAlignConfig;
 }
 
 export interface PlaybackState {
