@@ -1,9 +1,8 @@
 import { BasicPitch } from '@spotify/basic-pitch';
 import type { PitchFrame } from '../types';
-import { mixToMono } from './audioUtils';
 
 const MODEL_PATH = '/models/basic-pitch/model.json';
-const FRAME_SEC = 256 / 22050;
+const TARGET_SAMPLE_RATE = 22050;
 const MIDI_BASE = 21;
 const TOP_K = 12;
 const SILENCE_THRESHOLD = 0.06;
@@ -20,6 +19,19 @@ const getDetector = async (): Promise<BasicPitch> => {
 };
 
 const midiToHz = (midi: number): number => 440 * 2 ** ((midi - 69) / 12);
+
+const toMono22050 = async (buffer: AudioBuffer): Promise<AudioBuffer> => {
+  if (buffer.numberOfChannels === 1 && buffer.sampleRate === TARGET_SAMPLE_RATE) {
+    return buffer;
+  }
+  const length = Math.max(1, Math.ceil(buffer.duration * TARGET_SAMPLE_RATE));
+  const offline = new OfflineAudioContext(1, length, TARGET_SAMPLE_RATE);
+  const source = offline.createBufferSource();
+  source.buffer = buffer;
+  source.connect(offline.destination);
+  source.start(0);
+  return offline.startRendering();
+};
 
 interface Candidate {
   midi: number | null;
@@ -154,12 +166,12 @@ const viterbiTrack = (frames: number[][]): Array<{ midi: number | null; prob: nu
 };
 
 export const extractPitchByModel = async (buffer: AudioBuffer): Promise<PitchFrame[]> => {
-  const mono = mixToMono(buffer);
+  const normalized = await toMono22050(buffer);
   const detector = await getDetector();
   const frames: number[][] = [];
 
   await detector.evaluateModel(
-    mono,
+    normalized,
     (batchFrames) => {
       frames.push(...batchFrames);
     },
@@ -169,8 +181,10 @@ export const extractPitchByModel = async (buffer: AudioBuffer): Promise<PitchFra
   );
 
   const tracked = viterbiTrack(frames);
+  const frameSec =
+    tracked.length > 1 ? normalized.duration / (tracked.length - 1) : Math.max(0.001, normalized.duration);
   return tracked.map((item, index) => ({
-    timeSec: index * FRAME_SEC,
+    timeSec: index * frameSec,
     hz: item.midi === null ? null : midiToHz(item.midi),
     clarity: item.prob,
   }));

@@ -40,6 +40,7 @@ export interface PitchFrame {
 export interface ErrorFrame {
   timeSec: number;
   cents: number | null;
+  pairDtMs: number | null;
 }
 
 export interface ErrorSegment {
@@ -54,11 +55,15 @@ export interface AnalysisStats {
   maxAbsCents: number;
   passRatio: number;
   undetectedRatio: number;
+  pairDtP95Ms: number;
+  pairDtOverThresholdRatio: number;
 }
 
 export interface AnalysisResult {
   refPitch: PitchFrame[];
   userPitch: PitchFrame[];
+  userPitchObserved: PitchFrame[];
+  userPitchImputed: PitchFrame[];
   errorFrames: ErrorFrame[];
   stats: AnalysisStats;
   topSegments: ErrorSegment[];

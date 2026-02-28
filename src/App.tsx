@@ -15,6 +15,7 @@ import { clamp, createId, formatSec } from './lib/utils';
 import type {
   AnalysisConfig,
   PlaybackState,
+  PitchFrame,
   Project,
   ReferenceAlignConfig,
   RhythmConfig,
@@ -43,6 +44,22 @@ const defaultPlayback: PlaybackState = {
 };
 
 function App() {
+  type MidiPreviewSource = 'reference_vocal' | 'reference_chorus' | 'user_recording';
+  interface PreviewExtractionResult {
+    extractResult: AutoExtractResult;
+    sourceStartSec: number;
+    sourceDurationSec: number;
+    sourceLabel: string;
+    sourceKind: MidiPreviewSource;
+  }
+  const midiToHz = (midi: number): number => 440 * 2 ** ((midi - 69) / 12);
+  const midiToNoteName = (midi: number): string => {
+    const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const rounded = Math.round(midi);
+    const octave = Math.floor(rounded / 12) - 1;
+    const name = names[((rounded % 12) + 12) % 12];
+    return `${name}${octave}`;
+  };
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
@@ -70,6 +87,17 @@ function App() {
   );
   const [noteCursorSec, setNoteCursorSec] = useState(0);
   const [isNotePlaying, setIsNotePlaying] = useState(false);
+  const [isAnalysisComparePlaying, setIsAnalysisComparePlaying] = useState(false);
+  const [midiPreviewWithReference, setMidiPreviewWithReference] = useState(true);
+  const [midiPreviewWithClick, setMidiPreviewWithClick] = useState(true);
+  const [midiPreviewSource, setMidiPreviewSource] = useState<MidiPreviewSource>('reference_vocal');
+  const [previewSourceInfo, setPreviewSourceInfo] = useState<{
+    sessionId: string;
+    startSec: number;
+    durationSec: number;
+    label: string;
+    kind: MidiPreviewSource;
+  } | null>(null);
 
   const recorderRef = useRef(new Recorder());
   const referenceRecorderRef = useRef(new Recorder());
@@ -86,6 +114,9 @@ function App() {
     endSec: number;
   } | null>(null);
   const notePlaybackRef = useRef<{ stop: () => void } | null>(null);
+  const midiPreviewTimeoutIdsRef = useRef<number[]>([]);
+  const midiPreviewMetronomeRef = useRef<AudioContext | null>(null);
+  const analysisCompareTimeoutIdsRef = useRef<number[]>([]);
   const toastTimerRef = useRef<number | null>(null);
 
   const selectedProject = useMemo(
@@ -131,6 +162,21 @@ function App() {
   const previewDurationSec = currentPreviewNotes.reduce((max, note) => Math.max(max, note.endSec), 1);
   const currentPreviewMeta =
     selectedSession && previewMeta?.sessionId === selectedSession.id ? previewMeta.result : null;
+  const activePreviewSourceInfo =
+    selectedSession && previewSourceInfo?.sessionId === selectedSession.id ? previewSourceInfo : null;
+  const sourceCursorSec = clamp(
+    noteCursorSec,
+    0,
+    Math.max(0.001, activePreviewSourceInfo?.durationSec ?? previewDurationSec),
+  );
+  const sourceCursorRatio =
+    sourceCursorSec / Math.max(0.001, activePreviewSourceInfo?.durationSec ?? previewDurationSec);
+  const previewTimelineSec = Math.max(0.001, activePreviewSourceInfo?.durationSec ?? previewDurationSec);
+  const activePreviewNote = useMemo(
+    () =>
+      currentPreviewNotes.find((note) => note.startSec <= noteCursorSec && noteCursorSec <= note.endSec) ?? null,
+    [currentPreviewNotes, noteCursorSec],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -166,6 +212,12 @@ function App() {
     return () => {
       notePlaybackRef.current?.stop();
       notePlaybackRef.current = null;
+      midiPreviewTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+      midiPreviewTimeoutIdsRef.current = [];
+      midiPreviewMetronomeRef.current?.close().catch(() => {});
+      midiPreviewMetronomeRef.current = null;
+      analysisCompareTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+      analysisCompareTimeoutIdsRef.current = [];
       metronomeContextRef.current?.close().catch(() => {});
       metronomeContextRef.current = null;
       if (toastTimerRef.current !== null) {
@@ -368,6 +420,12 @@ function App() {
     setReferenceCursorSec(0);
     metronomeContextRef.current?.close().catch(() => {});
     metronomeContextRef.current = null;
+    midiPreviewTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    midiPreviewTimeoutIdsRef.current = [];
+    midiPreviewMetronomeRef.current?.close().catch(() => {});
+    midiPreviewMetronomeRef.current = null;
+    analysisCompareTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    analysisCompareTimeoutIdsRef.current = [];
     [vocalAudioRef.current, chorusAudioRef.current, userAudioRef.current].forEach((audio) => {
       if (!audio) return;
       audio.pause();
@@ -376,6 +434,7 @@ function App() {
     notePlaybackRef.current?.stop();
     notePlaybackRef.current = null;
     setIsNotePlaying(false);
+    setIsAnalysisComparePlaying(false);
     setNoteCursorSec(0);
   };
 
@@ -690,12 +749,19 @@ function App() {
       await persistProject(nextProject);
       setActiveSessionId(session.id);
       setStatus('解析完了。ノート抽出を自動最適化中...');
-      const optimizeResult = await optimizeNotesForSession(session);
-      setPreviewNotes({ sessionId: session.id, notes: optimizeResult.notes });
-      setPreviewMeta({ sessionId: session.id, result: optimizeResult });
-      await saveDebugSnapshot(session, optimizeResult, 'analyze');
+      const previewResult = await optimizeNotesForSession(session);
+      setPreviewNotes({ sessionId: session.id, notes: previewResult.extractResult.notes });
+      setPreviewMeta({ sessionId: session.id, result: previewResult.extractResult });
+      setPreviewSourceInfo({
+        sessionId: session.id,
+        startSec: previewResult.sourceStartSec,
+        durationSec: previewResult.sourceDurationSec,
+        label: previewResult.sourceLabel,
+        kind: previewResult.sourceKind,
+      });
+      await saveDebugSnapshot(session, previewResult.extractResult, 'analyze');
       setStatus(
-        `解析完了。ノート最適化: ${optimizeResult.notes.length} ノート（${optimizeResult.tried}試行）`,
+        `解析完了。ノート最適化: ${previewResult.extractResult.notes.length} ノート（${previewResult.extractResult.tried}試行）`,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : '録音停止に失敗しました';
@@ -747,12 +813,19 @@ function App() {
       };
       await persistProject(nextProject);
       setStatus('再解析完了。ノート抽出を自動最適化中...');
-      const optimizeResult = await optimizeNotesForSession(updatedSession);
-      setPreviewNotes({ sessionId: updatedSession.id, notes: optimizeResult.notes });
-      setPreviewMeta({ sessionId: updatedSession.id, result: optimizeResult });
-      await saveDebugSnapshot(updatedSession, optimizeResult, 'reanalyze');
+      const previewResult = await optimizeNotesForSession(updatedSession);
+      setPreviewNotes({ sessionId: updatedSession.id, notes: previewResult.extractResult.notes });
+      setPreviewMeta({ sessionId: updatedSession.id, result: previewResult.extractResult });
+      setPreviewSourceInfo({
+        sessionId: updatedSession.id,
+        startSec: previewResult.sourceStartSec,
+        durationSec: previewResult.sourceDurationSec,
+        label: previewResult.sourceLabel,
+        kind: previewResult.sourceKind,
+      });
+      await saveDebugSnapshot(updatedSession, previewResult.extractResult, 'reanalyze');
       setStatus(
-        `再解析完了。ノート最適化: ${optimizeResult.notes.length} ノート（${optimizeResult.tried}試行）`,
+        `再解析完了。ノート最適化: ${previewResult.extractResult.notes.length} ノート（${previewResult.extractResult.tried}試行）`,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : '再解析に失敗しました';
@@ -785,17 +858,84 @@ function App() {
     }
   };
 
+  const playAnalysisCompare = (fromSec = 0): void => {
+    if (!selectedSession) return;
+    if (!vocalUrl || !userRecordingUrl) {
+      setStatus('参照ボーカルと自分の録音が必要です。');
+      return;
+    }
+    stopAllPlayback();
+    const vocal = vocalAudioRef.current;
+    const user = userAudioRef.current;
+    if (!vocal || !user) return;
+
+    const refOffsetSec = getTrackOffsetMs('vocal') / 1000;
+    const userOffsetSec =
+      (selectedSession.manualOffsetMs + selectedSession.analysisResult.estimatedOffsetMs) / 1000;
+    const startSec = Math.max(0, fromSec);
+
+    const schedule = (audio: HTMLAudioElement, offsetSec: number): void => {
+      const delayMs = Math.max(0, (offsetSec - startSec) * 1000);
+      const seekSec = Math.max(0, startSec - offsetSec);
+      audio.currentTime = seekSec;
+      const id = window.setTimeout(() => {
+        void audio.play();
+      }, delayMs);
+      analysisCompareTimeoutIdsRef.current.push(id);
+    };
+
+    schedule(vocal, refOffsetSec);
+    schedule(user, userOffsetSec);
+
+    const endSec = Math.max(
+      (vocalTrack?.durationSec ?? 0) + refOffsetSec,
+      selectedSession.durationSec + userOffsetSec,
+      1,
+    );
+    const stopId = window.setTimeout(() => {
+      [vocalAudioRef.current, userAudioRef.current].forEach((audio) => audio?.pause());
+      setIsAnalysisComparePlaying(false);
+    }, Math.max(0, (endSec - startSec) * 1000 + 80));
+    analysisCompareTimeoutIdsRef.current.push(stopId);
+    setIsAnalysisComparePlaying(true);
+  };
+
+  const stopAnalysisCompare = (): void => {
+    analysisCompareTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    analysisCompareTimeoutIdsRef.current = [];
+    [vocalAudioRef.current, userAudioRef.current].forEach((audio) => audio?.pause());
+    setIsAnalysisComparePlaying(false);
+  };
+
   const generateMidiPreview = async (): Promise<void> => {
     if (!selectedSession) return;
-    setStatus('ノート抽出を自動最適化中...');
-    const optimizeResult = await optimizeNotesForSession(selectedSession);
-    setPreviewNotes({ sessionId: selectedSession.id, notes: optimizeResult.notes });
-    setPreviewMeta({ sessionId: selectedSession.id, result: optimizeResult });
-    setNoteCursorSec(0);
-    await saveDebugSnapshot(selectedSession, optimizeResult, 'note_extract');
-    setStatus(
-      `ノート抽出: ${optimizeResult.notes.length} ノート（${optimizeResult.tried}試行）を生成し、debugに自動保存しました。`,
-    );
+    const sourceLabel =
+      midiPreviewSource === 'reference_vocal'
+        ? '参照ボーカル'
+        : midiPreviewSource === 'reference_chorus'
+          ? '参照コーラス'
+          : '自分録音';
+    try {
+      setStatus(`${sourceLabel}をノート抽出中...`);
+      const previewResult = await optimizeNotesForSession(selectedSession);
+      setPreviewNotes({ sessionId: selectedSession.id, notes: previewResult.extractResult.notes });
+      setPreviewMeta({ sessionId: selectedSession.id, result: previewResult.extractResult });
+      setPreviewSourceInfo({
+        sessionId: selectedSession.id,
+        startSec: previewResult.sourceStartSec,
+        durationSec: previewResult.sourceDurationSec,
+        label: previewResult.sourceLabel,
+        kind: previewResult.sourceKind,
+      });
+      setNoteCursorSec(0);
+      await saveDebugSnapshot(selectedSession, previewResult.extractResult, 'note_extract');
+      setStatus(
+        `${sourceLabel}: ${previewResult.extractResult.notes.length} ノート（${previewResult.extractResult.tried}試行）を生成し、debugに保存しました。`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'ノート抽出に失敗しました';
+      setStatus(`ノート抽出エラー: ${message}`);
+    }
   };
 
   const playMidiPreview = (): void => {
@@ -805,13 +945,74 @@ function App() {
       setStatus('先に「ノート抽出」を実行してください。');
       return;
     }
-    notePlaybackRef.current?.stop();
+    stopAllPlayback();
+    const previewEndSec = notes.reduce((max, note) => Math.max(max, note.endSec), 0);
+
+    if (midiPreviewWithReference) {
+      const sourceAudio =
+        activePreviewSourceInfo?.kind === 'reference_chorus'
+          ? chorusAudioRef.current
+          : activePreviewSourceInfo?.kind === 'user_recording'
+            ? userAudioRef.current
+            : vocalAudioRef.current;
+      if (sourceAudio) {
+        const seekSec = Math.max(0, activePreviewSourceInfo?.startSec ?? 0);
+        sourceAudio.currentTime = seekSec;
+        const timeoutId = window.setTimeout(() => {
+          void sourceAudio.play();
+        }, 0);
+        midiPreviewTimeoutIdsRef.current.push(timeoutId);
+        const stopId = window.setTimeout(() => {
+          sourceAudio.pause();
+        }, Math.max(0, (activePreviewSourceInfo?.durationSec ?? previewEndSec) * 1000 + 80));
+        midiPreviewTimeoutIdsRef.current.push(stopId);
+      }
+    }
+
+    if (midiPreviewWithClick) {
+      const context = new AudioContext();
+      void context.resume().catch(() => {});
+      const beatSec = 60 / Math.max(1, bpm);
+      const clickOffsetSec = clickOffsetMs / 1000;
+      const firstBeatIndex = Math.ceil((0 - clickOffsetSec) / beatSec);
+      const scheduledStart = context.currentTime;
+      for (let beatIndex = firstBeatIndex; ; beatIndex += 1) {
+        const beatTimeSec = clickOffsetSec + beatIndex * beatSec;
+        if (beatTimeSec > previewEndSec + 0.0001) break;
+        const accent = ((beatIndex % beatsPerBar) + beatsPerBar) % beatsPerBar === 0;
+        const osc = context.createOscillator();
+        const gain = context.createGain();
+        osc.type = accent ? 'triangle' : 'sine';
+        osc.frequency.setValueAtTime(accent ? 1680 : 1120, scheduledStart + Math.max(0, beatTimeSec));
+        const velocity = clickVolume * (accent ? 1 : 0.72);
+        gain.gain.setValueAtTime(0.0001, scheduledStart + Math.max(0, beatTimeSec));
+        gain.gain.exponentialRampToValueAtTime(
+          Math.max(0.0001, velocity),
+          scheduledStart + Math.max(0, beatTimeSec) + 0.003,
+        );
+        gain.gain.exponentialRampToValueAtTime(
+          0.0001,
+          scheduledStart + Math.max(0, beatTimeSec) + 0.055,
+        );
+        osc.connect(gain);
+        gain.connect(context.destination);
+        osc.start(scheduledStart + Math.max(0, beatTimeSec));
+        osc.stop(scheduledStart + Math.max(0, beatTimeSec) + 0.06);
+      }
+      midiPreviewMetronomeRef.current = context;
+    }
+
     setIsNotePlaying(true);
     notePlaybackRef.current = playNoteEvents(
       notes,
       (sec) => setNoteCursorSec(sec),
       () => {
         notePlaybackRef.current = null;
+        midiPreviewTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+        midiPreviewTimeoutIdsRef.current = [];
+        midiPreviewMetronomeRef.current?.close().catch(() => {});
+        midiPreviewMetronomeRef.current = null;
+        [vocalAudioRef.current, chorusAudioRef.current, userAudioRef.current].forEach((audio) => audio?.pause());
         setIsNotePlaying(false);
       },
     );
@@ -820,19 +1021,131 @@ function App() {
   const stopMidiPreview = (): void => {
     notePlaybackRef.current?.stop();
     notePlaybackRef.current = null;
+    midiPreviewTimeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
+    midiPreviewTimeoutIdsRef.current = [];
+    midiPreviewMetronomeRef.current?.close().catch(() => {});
+    midiPreviewMetronomeRef.current = null;
+    [vocalAudioRef.current, chorusAudioRef.current, userAudioRef.current].forEach((audio) => audio?.pause());
     setIsNotePlaying(false);
   };
 
-  const optimizeNotesForSession = async (session: Session): Promise<AutoExtractResult> => {
-    if (session.rhythmConfig && session.analysisResult.userPitch.length > 0) {
-      return extractGridAlignedNoteEvents(session.analysisResult.userPitch);
+  const trimFramesToReferenceWindow = (session: Session, frames: typeof session.analysisResult.userPitch): PitchFrame[] => {
+    const refPitch = session.analysisResult.refPitch;
+    const voicedRef = refPitch.filter((frame) => frame.hz !== null);
+    if (voicedRef.length === 0) return frames;
+    const startSec = voicedRef[0].timeSec;
+    const endSec = voicedRef[voicedRef.length - 1].timeSec;
+    const padSec = 0.12;
+    return frames.filter((frame) => frame.timeSec >= startSec - padSec && frame.timeSec <= endSec + padSec);
+  };
+
+  const trimFramesToReferenceVoicedWindow = (frames: PitchFrame[]): PitchFrame[] => {
+    const voiced = frames.filter((frame) => frame.hz !== null);
+    if (voiced.length < 2) return frames;
+
+    const maxGapSec = 0.45;
+    const minVoicedCount = 8;
+    const segments: Array<{ startSec: number; endSec: number; voicedCount: number }> = [];
+    let startSec = voiced[0].timeSec;
+    let endSec = voiced[0].timeSec;
+    let count = 1;
+
+    for (let i = 1; i < voiced.length; i += 1) {
+      const prev = voiced[i - 1];
+      const cur = voiced[i];
+      if (cur.timeSec - prev.timeSec > maxGapSec) {
+        segments.push({ startSec, endSec, voicedCount: count });
+        startSec = cur.timeSec;
+        endSec = cur.timeSec;
+        count = 1;
+      } else {
+        endSec = cur.timeSec;
+        count += 1;
+      }
     }
-    if (session.analysisResult.userPitch.length > 0) {
-      return autoExtractBestNoteEvents(session.analysisResult.userPitch);
+    segments.push({ startSec, endSec, voicedCount: count });
+
+    const validSegments = segments.filter((segment) => segment.voicedCount >= minVoicedCount);
+    if (validSegments.length === 0) return frames;
+
+    const padSec = 0.18;
+    const clipStart = Math.max(0, Math.min(...validSegments.map((segment) => segment.startSec)) - padSec);
+    const clipEnd = Math.max(...validSegments.map((segment) => segment.endSec)) + padSec;
+    return frames.filter((frame) => frame.timeSec >= clipStart && frame.timeSec <= clipEnd);
+  };
+
+  const optimizeNotesFromFrames = (
+    frames: PitchFrame[],
+    useGridOptimization: boolean,
+  ): AutoExtractResult => {
+    const auto = autoExtractBestNoteEvents(frames);
+    if (!useGridOptimization) return auto;
+    const grid = extractGridAlignedNoteEvents(frames);
+    return grid.debug.score > auto.debug.score ? grid : auto;
+  };
+
+  const optimizeNotesForReferenceTrack = async (
+    role: TrackRole,
+    useGridOptimization: boolean,
+  ): Promise<PreviewExtractionResult> => {
+    const track = getTrack(role);
+    if (!track) {
+      throw new Error(`参照${role === 'vocal' ? 'ボーカル' : 'コーラス'}が未登録です。`);
+    }
+    const buffer = await decodeBlobToAudioBuffer(track.blob);
+    const rawPitch = await extractPitchByModel(buffer);
+    const filteredPitch = rawPitch.map((frame) => ({
+      ...frame,
+      hz: frame.clarity >= analysisConfig.clarityThreshold ? frame.hz : null,
+    }));
+    const scopedPitch = trimFramesToReferenceVoicedWindow(filteredPitch);
+    const sourceStartSec = scopedPitch[0]?.timeSec ?? 0;
+    const sourceEndSec = scopedPitch.at(-1)?.timeSec ?? sourceStartSec;
+    const rebasedPitch = scopedPitch.map((frame) => ({
+      ...frame,
+      timeSec: Math.max(0, frame.timeSec - sourceStartSec),
+    }));
+    return {
+      extractResult: optimizeNotesFromFrames(rebasedPitch, useGridOptimization),
+      sourceStartSec,
+      sourceDurationSec: Math.max(0.001, sourceEndSec - sourceStartSec),
+      sourceLabel: role === 'vocal' ? '参照ボーカル' : '参照コーラス',
+      sourceKind: role === 'vocal' ? 'reference_vocal' : 'reference_chorus',
+    };
+  };
+
+  const optimizeNotesForPreviewSource = async (session: Session): Promise<PreviewExtractionResult> => {
+    const useGridOptimization = Boolean(session.rhythmConfig);
+    if (midiPreviewSource === 'reference_vocal') {
+      return optimizeNotesForReferenceTrack('vocal', useGridOptimization);
+    }
+    if (midiPreviewSource === 'reference_chorus') {
+      return optimizeNotesForReferenceTrack('chorus', useGridOptimization);
+    }
+    const observedPitch = session.analysisResult.userPitchObserved ?? session.analysisResult.userPitch;
+    const scopedPitch = trimFramesToReferenceWindow(session, observedPitch);
+    if (scopedPitch.length > 0) {
+      return {
+        extractResult: optimizeNotesFromFrames(scopedPitch, useGridOptimization),
+        sourceStartSec: 0,
+        sourceDurationSec: Math.max(0.001, session.durationSec),
+        sourceLabel: '自分録音',
+        sourceKind: 'user_recording',
+      };
     }
     const userBuffer = await decodeBlobToAudioBuffer(session.recording);
     const rawPitch = await extractPitchByModel(userBuffer);
-    return autoExtractBestNoteEvents(rawPitch);
+    return {
+      extractResult: optimizeNotesFromFrames(rawPitch, useGridOptimization),
+      sourceStartSec: 0,
+      sourceDurationSec: Math.max(0.001, session.durationSec),
+      sourceLabel: '自分録音',
+      sourceKind: 'user_recording',
+    };
+  };
+
+  const optimizeNotesForSession = async (session: Session): Promise<PreviewExtractionResult> => {
+    return optimizeNotesForPreviewSource(session);
   };
 
   const saveDebugSnapshot = async (
@@ -862,6 +1175,8 @@ function App() {
       input: {
         refPitch: session.analysisResult.refPitch,
         userPitch: session.analysisResult.userPitch,
+        userPitchObserved: session.analysisResult.userPitchObserved ?? session.analysisResult.userPitch,
+        userPitchImputed: session.analysisResult.userPitchImputed ?? session.analysisResult.userPitch,
         errorFrames: session.analysisResult.errorFrames,
       },
       output: {
@@ -889,10 +1204,14 @@ function App() {
     ? selectedSession.analysisResult.refPitch.filter((frame) => frame.hz !== null).length
     : 0;
   const userDetectedCount = selectedSession
-    ? selectedSession.analysisResult.userPitch.filter((frame) => frame.hz !== null).length
+    ? (selectedSession.analysisResult.userPitchObserved ?? selectedSession.analysisResult.userPitch).filter(
+        (frame) => frame.hz !== null,
+      ).length
     : 0;
   const refTotalCount = selectedSession ? selectedSession.analysisResult.refPitch.length : 0;
-  const userTotalCount = selectedSession ? selectedSession.analysisResult.userPitch.length : 0;
+  const userTotalCount = selectedSession
+    ? (selectedSession.analysisResult.userPitchObserved ?? selectedSession.analysisResult.userPitch).length
+    : 0;
 
   return (
     <>
@@ -1243,15 +1562,49 @@ function App() {
                     <strong>開始ズレ推定</strong>
                     <span>{selectedSession.analysisResult.estimatedOffsetMs.toFixed(0)} ms</span>
                   </div>
+                  <div>
+                    <strong>ペア距離P95</strong>
+                    <span>{(selectedSession.analysisResult.stats.pairDtP95Ms ?? 0).toFixed(1)} ms</span>
+                  </div>
+                  <div>
+                    <strong>距離超過率</strong>
+                    <span>
+                      {(
+                        ((selectedSession.analysisResult.stats.pairDtOverThresholdRatio ?? 0) as number) * 100
+                      ).toFixed(1)}
+                      %
+                    </span>
+                  </div>
                 </div>
 
-                <PitchCanvas
-                  refPitch={selectedSession.analysisResult.refPitch}
-                  userPitch={selectedSession.analysisResult.userPitch}
-                  errors={selectedSession.analysisResult.errorFrames}
-                  toleranceCents={selectedSession.analysisConfig.toleranceCents}
-                  offsetMs={selectedSession.manualOffsetMs + selectedSession.analysisResult.estimatedOffsetMs}
-                />
+                <div className="analysis-audio-grid">
+                  <div className="analysis-audio-panel">
+                    <h4>比較再生（参照ボーカル vs 自分録音）</h4>
+                    <div className="controls-row">
+                      <button type="button" onClick={() => playAnalysisCompare(0)}>
+                        同時再生
+                      </button>
+                      <button type="button" disabled={!isAnalysisComparePlaying} onClick={stopAnalysisCompare}>
+                        停止
+                      </button>
+                    </div>
+                    <label>
+                      参照ボーカル
+                      <audio controls src={vocalUrl} />
+                    </label>
+                    <label>
+                      自分の録音
+                      <audio controls src={userRecordingUrl} />
+                    </label>
+                  </div>
+                  <PitchCanvas
+                    refPitch={selectedSession.analysisResult.refPitch}
+                    userPitch={selectedSession.analysisResult.userPitch}
+                    errors={selectedSession.analysisResult.errorFrames}
+                    toleranceCents={selectedSession.analysisConfig.toleranceCents}
+                    offsetMs={selectedSession.manualOffsetMs + selectedSession.analysisResult.estimatedOffsetMs}
+                  />
+                </div>
 
                 <div>
                   <h4>外れている区間トップ3</h4>
@@ -1268,8 +1621,19 @@ function App() {
                 </div>
 
                 <div className="card-subsection">
-                  <h4>MIDIプレビュー（録音→ノート化）</h4>
+                  <h4>MIDIプレビュー（選択音源→ノート化）</h4>
                   <div className="controls-row">
+                    <label>
+                      ソース
+                      <select
+                        value={midiPreviewSource}
+                        onChange={(event) => setMidiPreviewSource(event.target.value as MidiPreviewSource)}
+                      >
+                        <option value="reference_vocal">参照ボーカル</option>
+                        <option value="reference_chorus">参照コーラス</option>
+                        <option value="user_recording">自分録音</option>
+                      </select>
+                    </label>
                     <button type="button" onClick={() => void generateMidiPreview()}>
                       ノート抽出
                     </button>
@@ -1279,27 +1643,62 @@ function App() {
                     <button type="button" disabled={!isNotePlaying} onClick={stopMidiPreview}>
                       停止
                     </button>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={midiPreviewWithReference}
+                        onChange={(event) => setMidiPreviewWithReference(event.target.checked)}
+                      />
+                      参照同時再生
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={midiPreviewWithClick}
+                        onChange={(event) => setMidiPreviewWithClick(event.target.checked)}
+                      />
+                      クリック同時再生
+                    </label>
                     <strong>
                       ノート数: {currentPreviewNotes.length} / 再生位置: {formatSec(noteCursorSec)}
                     </strong>
                   </div>
-                  {currentPreviewMeta && (
-                    <div className="caption">
-                      自動最適化: {currentPreviewMeta.tried}試行 / MAE{' '}
-                      {currentPreviewMeta.debug.maeCents.toFixed(1)} cents / カバレッジ{' '}
-                      {(currentPreviewMeta.debug.coverage * 100).toFixed(1)}% / パラメータ(
-                      minDur={currentPreviewMeta.options.minDurationSec.toFixed(2)}s, median=
-                      {currentPreviewMeta.options.medianWindow}, smooth=
-                      {currentPreviewMeta.options.smoothWindow}, gap=
-                      {currentPreviewMeta.options.gapFillSemitone}, cont=
-                      {currentPreviewMeta.options.continuityLimitSemitone})
+                  <div className="midi-timeline-stack">
+                    <div className="source-preview-block">
+                      <div className="caption">
+                        ソース: {activePreviewSourceInfo?.label ?? '未抽出'} / カーソル {formatSec(sourceCursorSec)} /
+                        長さ {formatSec(activePreviewSourceInfo?.durationSec ?? previewDurationSec)}
+                      </div>
+                      <div className="source-cursor-track">
+                        <div
+                          className="source-cursor-line"
+                          style={{ left: `${Math.min(100, Math.max(0, sourceCursorRatio * 100))}%` }}
+                        />
+                      </div>
+                      <div className="source-midi-readout">
+                        {activePreviewNote
+                          ? `現在のMIDI: ${midiToNoteName(activePreviewNote.midi)} (midi ${activePreviewNote.midi}, ${midiToHz(activePreviewNote.midi).toFixed(2)} Hz)`
+                          : '現在のMIDI: 休符'}
+                      </div>
                     </div>
-                  )}
-                  <PianoRoll
-                    notes={currentPreviewNotes}
-                    durationSec={previewDurationSec}
-                    cursorSec={noteCursorSec}
-                  />
+                    {currentPreviewMeta && (
+                      <div className="caption">
+                        自動最適化: {currentPreviewMeta.tried}試行 / MAE{' '}
+                        {currentPreviewMeta.debug.maeCents.toFixed(1)} cents / カバレッジ{' '}
+                        {(currentPreviewMeta.debug.coverage * 100).toFixed(1)}% / パラメータ(
+                        minDur={currentPreviewMeta.options.minDurationSec.toFixed(2)}s, median=
+                        {currentPreviewMeta.options.medianWindow}, smooth=
+                        {currentPreviewMeta.options.smoothWindow}, gap=
+                        {currentPreviewMeta.options.gapFillSemitone}, cont=
+                        {currentPreviewMeta.options.continuityLimitSemitone})
+                      </div>
+                    )}
+                    <PianoRoll
+                      notes={currentPreviewNotes}
+                      durationSec={previewTimelineSec}
+                      cursorSec={noteCursorSec}
+                    />
+                  </div>
                 </div>
               </section>
             )}

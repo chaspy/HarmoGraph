@@ -9,7 +9,7 @@
 - 評価軸: ピッチ優先（開始ズレ補正のためグローバルオフセット推定あり）
 - 許容誤差: 初期値 ±25 cents（UIで調整可能）
 - 曲長: 5分想定、最大10分
-- 保存単位: 「曲(Project)」単位で参照トラックと練習セッションをIndexedDB保存
+- 保存単位: 「曲(Project)」単位で参照トラックと練習セッションをローカルDB保存（ブラウザ共通）
 - UI方針: 機能優先（CSSで簡易デザイン）
 
 ## 技術スタック
@@ -17,7 +17,7 @@
 - Web Audio API / MediaRecorder
 - Basic Pitch（機械学習ベースのピッチ推定） + Viterbi最適化
 - Canvas（ピッチ重ね描き）
-- IndexedDB（idb）
+- ローカルファイルDB（`/.harmograph-db/projects/*.json`）
 
 ## できること（MVP）
 - 曲(Project)の作成
@@ -46,7 +46,7 @@
 - `src/lib/audioUtils.ts`
   - デコード、モノラル化、平滑化などの音声ユーティリティ
 - `src/lib/storage.ts`
-  - IndexedDBへのProject保存/読込/削除
+  - ローカルDB API経由のProject保存/読込/削除（旧IndexedDBからの移行対応）
 - `src/components/PitchCanvas.tsx`
   - 参照/自分ピッチと差分ハイライト描画
 - `src/App.tsx`
@@ -54,8 +54,8 @@
 
 ## ローカル起動
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 - ブラウザで表示されたURLを開く（例: `http://localhost:5173`）
 - 初回録音時にマイク権限を許可してください
@@ -105,7 +105,8 @@ npm run build
 - オフライン前提だが、Google Fonts読込のため初回のみネットワークがあると表示が安定
 
 ## データ取り扱い
-- 音声データ・解析結果はブラウザ内（IndexedDB）にのみ保存
+- 音声データ・解析結果はローカルPC上の `/.harmograph-db` に保存
+- 同じPCで `pnpm dev` で起動したアプリなら、別ブラウザでも同じデータを参照可能
 - 外部API送信は行いません
 
 ## 今後の拡張候補（MVPの次）

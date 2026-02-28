@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 debug
+.harmograph-db
 
 # Editor directories and files
 .vscode/*

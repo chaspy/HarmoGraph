@@ -19,6 +19,13 @@ export const DEFAULT_ANALYSIS_CONFIG: AnalysisConfig = {
 
 const centsError = (userHz: number, refHz: number): number => 1200 * Math.log2(userHz / refHz);
 
+const wrapOffsetMs = (offsetMs: number, periodMs: number): number => {
+  if (!Number.isFinite(offsetMs) || periodMs <= 0) return offsetMs;
+  const half = periodMs / 2;
+  const normalized = ((offsetMs + half) % periodMs + periodMs) % periodMs;
+  return normalized - half;
+};
+
 const buildEnvelope = (mono: Float32Array, windowSize: number, hopSize: number): number[] => {
   const envelope: number[] = [];
   for (let i = 0; i + windowSize <= mono.length; i += hopSize) {
@@ -75,8 +82,18 @@ const estimateGlobalOffsetMs = (
   return (bestLag * hopSize * 1000) / sampleRate;
 };
 
-const findNearestPitch = (frames: PitchFrame[], targetSec: number): PitchFrame | null => {
+const findNearestPitch = (
+  frames: PitchFrame[],
+  targetSec: number,
+  maxDeltaSec: number,
+): PitchFrame | null => {
   if (frames.length === 0) return null;
+  const first = frames[0].timeSec;
+  const last = frames[frames.length - 1].timeSec;
+  if (targetSec < first - maxDeltaSec || targetSec > last + maxDeltaSec) {
+    return null;
+  }
+
   let lo = 0;
   let hi = frames.length - 1;
   while (lo < hi) {
@@ -90,7 +107,9 @@ const findNearestPitch = (frames: PitchFrame[], targetSec: number): PitchFrame |
 
   const current = frames[lo];
   const prev = lo > 0 ? frames[lo - 1] : current;
-  return Math.abs(prev.timeSec - targetSec) < Math.abs(current.timeSec - targetSec) ? prev : current;
+  const nearest =
+    Math.abs(prev.timeSec - targetSec) < Math.abs(current.timeSec - targetSec) ? prev : current;
+  return Math.abs(nearest.timeSec - targetSec) <= maxDeltaSec ? nearest : null;
 };
 
 const buildErrorSegments = (
@@ -135,6 +154,12 @@ const buildErrorSegments = (
 };
 
 const finiteOrZero = (value: number): number => (Number.isFinite(value) ? value : 0);
+const percentile = (values: number[], ratio: number): number => {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
+  return sorted[idx];
+};
 const hzToMidi = (hz: number): number => 69 + 12 * Math.log2(hz / 440);
 const midiToHz = (midi: number): number => 440 * 2 ** ((midi - 69) / 12);
 
@@ -344,33 +369,45 @@ export const analyzePitch = async (
     hz: frame.clarity >= config.clarityThreshold ? frame.hz : null,
   }));
   const refPitch = quantizePitchToRhythmGrid(refVoiced, rhythm);
-  const userGrid = quantizePitchToRhythmGrid(userVoiced, rhythm);
-  const userPitch = guidedReferenceFill(
+  const userPitchObserved = quantizePitchToRhythmGrid(userVoiced, rhythm);
+  const userPitchImputed = guidedReferenceFill(
     backfillFromNextVoicedCell(
-      holdVoicingOnReferenceCells(fillShortNullGaps(userGrid, 5, 1), refPitch, 8),
+      holdVoicingOnReferenceCells(fillShortNullGaps(userPitchObserved, 5, 1), refPitch, 8),
       refPitch,
       0,
     ),
     refPitch,
-    userGrid,
+    userPitchObserved,
     30,
     1200,
   );
 
-  const estimatedOffsetMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
+  const estimatedOffsetRawMs = estimateGlobalOffsetMs(refMono, userMono, refBuffer.sampleRate);
+  const beatMs = 60000 / Math.max(1, rhythm.bpm);
+  const beatsPerBar = 4;
+  const barMs = beatMs * beatsPerBar;
+  const estimatedOffsetMs = wrapOffsetMs(estimatedOffsetRawMs, barMs);
   const totalOffsetSec = (estimatedOffsetMs + manualOffsetMs) / 1000;
+  const maxPairDeltaSec = Math.max((60 / Math.max(1, rhythm.bpm) / Math.max(1, rhythm.subdivision)) * 2, 0.25);
+  const pairDtThresholdMs = maxPairDeltaSec * 1000;
 
   const errorFrames: ErrorFrame[] = refPitch.map((refFrame) => {
     if (refFrame.hz === null) {
-      return { timeSec: refFrame.timeSec, cents: null };
+      return { timeSec: refFrame.timeSec, cents: null, pairDtMs: null };
     }
-    const candidate = findNearestPitch(userPitch, refFrame.timeSec + totalOffsetSec);
-    if (!candidate || candidate.hz === null) {
-      return { timeSec: refFrame.timeSec, cents: null };
+    const targetSec = refFrame.timeSec + totalOffsetSec;
+    const candidate = findNearestPitch(userPitchObserved, targetSec, maxPairDeltaSec);
+    if (!candidate) {
+      return { timeSec: refFrame.timeSec, cents: null, pairDtMs: null };
+    }
+    const pairDtMs = Math.abs(candidate.timeSec - targetSec) * 1000;
+    if (candidate.hz === null) {
+      return { timeSec: refFrame.timeSec, cents: null, pairDtMs };
     }
     return {
       timeSec: refFrame.timeSec,
       cents: centsError(candidate.hz, refFrame.hz),
+      pairDtMs,
     };
   });
 
@@ -381,6 +418,9 @@ export const analyzePitch = async (
 
   const passCount = validErrors.filter((value) => value <= config.toleranceCents).length;
   const undetectedCount = errorFrames.filter((frame) => frame.cents === null).length;
+  const pairDtValues = errorFrames
+    .map((frame) => frame.pairDtMs)
+    .filter((value): value is number => value !== null);
 
   const meanAbsCents =
     validErrors.length === 0 ? 0 : validErrors.reduce((a, b) => a + b, 0) / validErrors.length;
@@ -388,10 +428,17 @@ export const analyzePitch = async (
   const maxAbsCents = validErrors.length === 0 ? 0 : Math.max(...validErrors);
   const passRatio = validErrors.length === 0 ? 0 : passCount / validErrors.length;
   const undetectedRatio = errorFrames.length === 0 ? 0 : undetectedCount / errorFrames.length;
+  const pairDtP95Ms = percentile(pairDtValues, 0.95);
+  const pairDtOverThresholdRatio =
+    pairDtValues.length === 0
+      ? 0
+      : pairDtValues.filter((value) => value > pairDtThresholdMs).length / pairDtValues.length;
 
   return {
     refPitch,
-    userPitch,
+    userPitch: userPitchImputed,
+    userPitchObserved,
+    userPitchImputed,
     errorFrames,
     estimatedOffsetMs: finiteOrZero(estimatedOffsetMs),
     stats: {
@@ -400,6 +447,8 @@ export const analyzePitch = async (
       maxAbsCents: finiteOrZero(maxAbsCents),
       passRatio: finiteOrZero(passRatio),
       undetectedRatio: finiteOrZero(undetectedRatio),
+      pairDtP95Ms: finiteOrZero(pairDtP95Ms),
+      pairDtOverThresholdRatio: finiteOrZero(pairDtOverThresholdRatio),
     },
     topSegments: buildErrorSegments(errorFrames, config.toleranceCents),
   };
